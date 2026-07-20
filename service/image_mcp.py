@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import redirect_stdout
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -122,6 +124,23 @@ def _load_image_gen() -> Any:
     return import_module("image_gen")
 
 
+def _write_audit(state: str, **details: Any) -> None:
+    control_dir = _job_dir() / "control"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "state": state,
+        "updated_at": datetime.now(UTC).isoformat(),
+        **details,
+    }
+    path = control_dir / "image_generation.json"
+    temporary_path = path.with_suffix(".tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
 def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
     api_key = _required_env("PPT_IMAGE_API_KEY")
     base_url = _required_env("PPT_IMAGE_BASE_URL").rstrip("/")
@@ -133,6 +152,13 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
 
     manifest = _manifest_path(manifest_path)
     payload = _validate_manifest(manifest, model)
+    audit_details = {
+        "manifest_path": str(manifest.relative_to(_job_dir())),
+        "model": model,
+        "item_count": len(payload["items"]),
+        "requested_image_size": image_size,
+    }
+    _write_audit("running", **audit_details)
     os.environ.update(
         {
             "IMAGE_BACKEND": "openai",
@@ -144,20 +170,28 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
             "OPENAI_SIZE_OVERRIDE": image_size,
         }
     )
-    image_gen = _load_image_gen()
-    backend, _ = image_gen._load_backend("openai")
-    _, failed, _ = image_gen._run_manifest(
-        payload,
-        str(manifest),
-        backend,
-        initial_concurrency=2,
-        image_size="1K",
-        output_dir=str(manifest.parent),
-        model=model,
-    )
-    image_gen.render_manifest_md_to_file(str(manifest), payload)
-    if failed:
-        raise RuntimeError(f"Image generation failed for {failed} manifest item(s)")
+    try:
+        # MCP stdio reserves stdout for JSON-RPC; provider progress belongs on stderr.
+        with redirect_stdout(sys.stderr):
+            image_gen = _load_image_gen()
+            backend, _ = image_gen._load_backend("openai")
+            _, failed, _ = image_gen._run_manifest(
+                payload,
+                str(manifest),
+                backend,
+                initial_concurrency=2,
+                image_size="1K",
+                output_dir=str(manifest.parent),
+                model=model,
+            )
+            image_gen.render_manifest_md_to_file(str(manifest), payload)
+        if failed:
+            raise RuntimeError(
+                f"Image generation failed for {failed} manifest item(s)"
+            )
+    except Exception as exc:
+        _write_audit("failed", error=str(exc)[:500], **audit_details)
+        raise
 
     generated_files = []
     generated_dimensions: dict[str, str] = {}
@@ -168,13 +202,20 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
             generated_files.append(relative_path)
             with Image.open(candidate) as image:
                 generated_dimensions[relative_path] = f"{image.width}x{image.height}"
-    return {
+    result = {
         "manifest_path": str(manifest.relative_to(_job_dir())),
         "generated_files": generated_files,
         "generated_dimensions": generated_dimensions,
         "message": f"Generated {len(generated_files)} image(s) with {model}",
         "requested_image_size": image_size,
     }
+    _write_audit(
+        "succeeded",
+        generated_files=generated_files,
+        generated_dimensions=generated_dimensions,
+        **audit_details,
+    )
+    return result
 
 
 @mcp.tool()

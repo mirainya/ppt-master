@@ -336,6 +336,17 @@ async def _sync_observed_progress(
         target_status = JobStatus.EXECUTING
         message = f"正在生成页面，已完成 {observed.page_count} 页"
         progress = 50
+    elif observed.image_generation_updated:
+        image_count = observed.image_generation_count
+        count_label = f" {image_count} 张" if image_count else ""
+        if observed.image_generation_state == "running":
+            target_status = JobStatus.ACQUIRING
+            message = f"正在调用生图模型生成{count_label}素材图"
+            progress = 45
+        elif observed.image_generation_state == "succeeded":
+            target_status = JobStatus.EXECUTING
+            message = "素材图生成完成，正在更新页面"
+            progress = 50
 
     current_rank = _RUNNING_STAGE_RANK.get(current_status, -1)
     target_rank = _RUNNING_STAGE_RANK.get(target_status, -1)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import re
 from dataclasses import dataclass
@@ -62,6 +63,9 @@ class WorkspaceProgress:
     page_output_updated: bool
     quality_report_ready: bool
     presentation_ready: bool
+    image_generation_state: str | None
+    image_generation_updated: bool
+    image_generation_count: int
 
 
 class JobStorage:
@@ -192,11 +196,31 @@ class JobStorage:
             path.stat().st_mtime >= changed_after
             for path in workspace.glob("**/exports/*.pptx")
         )
+        image_generation_state: str | None = None
+        image_generation_count = 0
+        image_audit_path = self.job_dir(job_id) / "control" / "image_generation.json"
+        image_generation_updated = (
+            image_audit_path.is_file()
+            and image_audit_path.stat().st_mtime >= changed_after
+        )
+        if image_generation_updated:
+            try:
+                image_audit = json.loads(image_audit_path.read_text(encoding="utf-8"))
+                image_generation_state = str(image_audit.get("state", "")) or None
+                image_generation_count = max(
+                    0,
+                    int(image_audit.get("item_count", 0)),
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                image_generation_state = None
         return WorkspaceProgress(
             page_count=len(pages),
             page_output_updated=page_output_updated,
             quality_report_ready=quality_report_ready,
             presentation_ready=presentation_ready,
+            image_generation_state=image_generation_state,
+            image_generation_updated=image_generation_updated,
+            image_generation_count=image_generation_count,
         )
 
     def discover_live_previews(self, job_id: UUID) -> list[StoredFile]:
