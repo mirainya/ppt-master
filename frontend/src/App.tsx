@@ -106,6 +106,10 @@ function statusTone(status: JobStatus): string {
   return "active";
 }
 
+function statusLabel(status: JobStatus, running: boolean): string {
+  return running ? "处理中" : statusLabels[status];
+}
+
 function eventMessage(event: JobEvent | null): string {
   if (!event) return "正在准备任务";
   return eventMessageLabels[event.message] || event.message;
@@ -790,7 +794,7 @@ export default function App() {
               <span
                 className={`status-label ${statusTone(selectedJob.status)}`}
               >
-                {statusLabels[selectedJob.status]}
+                {statusLabel(selectedJob.status, isRunning)}
               </span>
             )}
           </div>
@@ -832,6 +836,13 @@ export default function App() {
               <div className="message-row user-message">
                 <div className="message-bubble">{selectedJob.prompt}</div>
               </div>
+              {confirmation?.response?.message?.trim() && (
+                <div className="message-row user-message revision-message">
+                  <div className="message-bubble">
+                    {confirmation.response.message}
+                  </div>
+                </div>
+              )}
               {selectedJob.status === "failed" && (
                 <div className="failure-status" role="alert">
                   <div className="failure-status-icon">
@@ -861,6 +872,7 @@ export default function App() {
                   <div className="run-status-copy">
                     <strong>{displayedActivityMessage}</strong>
                     <span>
+                      {statusLabels[selectedJob.status]} ·{" "}
                       {formatElapsed(
                         runStartedEvent?.created_at || selectedJob.updated_at,
                         now,
@@ -983,7 +995,7 @@ export default function App() {
               onKeyDown={handleComposerKeyDown}
               placeholder={
                 isRunning
-                  ? `${statusLabels[selectedJob?.status ?? "queued"]}，请稍候`
+                  ? `${statusLabel(selectedJob?.status ?? "queued", true)}，请稍候`
                   : selectedJob?.status === "awaiting_confirmation"
                     ? "写下修改意见"
                     : selectedJob?.status === "awaiting_asset"
@@ -1074,7 +1086,7 @@ export default function App() {
               {previewArtifacts.length > 0
                 ? `${previewArtifacts.length} 页`
                 : selectedJob
-                  ? statusLabels[selectedJob.status]
+                  ? statusLabel(selectedJob.status, isRunning)
                   : "尚未开始"}
             </span>
           </div>
@@ -1164,7 +1176,9 @@ export default function App() {
                   )}
                 </div>
                 <strong>
-                  {selectedJob ? statusLabels[selectedJob.status] : "尚未生成"}
+                  {selectedJob
+                    ? statusLabel(selectedJob.status, isRunning)
+                    : "尚未生成"}
                 </strong>
                 <span>
                   {previewStatusMessage(

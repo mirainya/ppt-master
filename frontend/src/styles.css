@@ -514,6 +514,34 @@ textarea:focus-visible {
   background: var(--warm-soft);
 }
 
+.status-label.active {
+  position: relative;
+  padding-left: 17px;
+}
+
+.status-label.active::before {
+  position: absolute;
+  top: 50%;
+  left: 7px;
+  width: 5px;
+  height: 5px;
+  content: "";
+  background: currentColor;
+  border-radius: 50%;
+  transform: translateY(-50%);
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 .messages {
   flex: 1;
   min-height: 0;
@@ -554,6 +582,10 @@ textarea:focus-visible {
 
 .user-message {
   justify-content: flex-end;
+}
+
+.revision-message {
+  margin-top: -8px;
 }
 
 .assistant-message {
