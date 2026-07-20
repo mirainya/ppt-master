@@ -1,0 +1,14 @@
+.git
+.github
+.pytest_cache
+.ruff_cache
+examples
+frontend/dist
+frontend/node_modules
+projects
+runtime
+temp_files
+__pycache__
+*.pyc
+*.log
+.env

@@ -1,0 +1,118 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ppt_master
+      POSTGRES_USER: ppt_master
+      POSTGRES_PASSWORD: ${PPT_POSTGRES_PASSWORD:?Set PPT_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ppt_master -d ppt_master"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    environment:
+      PPT_DATABASE_URL: postgresql://ppt_master:${PPT_POSTGRES_PASSWORD}@postgres:5432/ppt_master
+      PPT_REDIS_URL: redis://redis:6379/0
+      PPT_RUNTIME_ROOT: /app/runtime/jobs
+      PPT_SESSION_COOKIE_SECURE: "true"
+      PPT_SESSION_DAYS: ${PPT_SESSION_DAYS:-30}
+      PPT_JOB_LEASE_SECONDS: ${PPT_JOB_LEASE_SECONDS:-30}
+      PPT_JOB_HEARTBEAT_SECONDS: ${PPT_JOB_HEARTBEAT_SECONDS:-5}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()",
+        ]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 10s
+    volumes:
+      - runtime_data:/app/runtime/jobs
+    restart: unless-stopped
+
+  caddy:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      PPT_API_DOMAIN: ${PPT_API_DOMAIN:?Set PPT_API_DOMAIN}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: service/Dockerfile
+    command: ["python", "-m", "service.worker"]
+    init: true
+    shm_size: "1gb"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      PPT_DATABASE_URL: postgresql://ppt_master:${PPT_POSTGRES_PASSWORD}@postgres:5432/ppt_master
+      PPT_REDIS_URL: redis://redis:6379/0
+      PPT_RUNTIME_ROOT: /app/runtime/jobs
+      PPT_JOB_LEASE_SECONDS: ${PPT_JOB_LEASE_SECONDS:-30}
+      PPT_JOB_HEARTBEAT_SECONDS: ${PPT_JOB_HEARTBEAT_SECONDS:-5}
+      PPT_RUNNER_MODEL: ${PPT_RUNNER_MODEL:-}
+      PPT_IMAGE_API_KEY: ${PPT_IMAGE_API_KEY:?Set PPT_IMAGE_API_KEY}
+      PPT_IMAGE_BASE_URL: ${PPT_IMAGE_BASE_URL:-https://prism.example.com/v1}
+      PPT_IMAGE_MODEL: ${PPT_IMAGE_MODEL:-gpt_image2}
+      PPT_IMAGE_SIZE: ${PPT_IMAGE_SIZE:-2048x1536}
+      CODEX_HOME: /home/pptmaster/.codex
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - runtime_data:/app/runtime/jobs
+      - codex_data:/home/pptmaster/.codex
+    restart: unless-stopped
+
+volumes:
+  caddy_config:
+  caddy_data:
+  codex_data:
+  postgres_data:
+  redis_data:
+  runtime_data:

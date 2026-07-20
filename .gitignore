@@ -149,10 +149,12 @@ MANIFEST
 
 # Node.js (if you add Node.js tools later)
 node_modules/
+*.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 package-lock.json
+!frontend/package-lock.json
 yarn.lock
 .npm
 .eslintcache
@@ -171,6 +173,10 @@ yarn.lock
 .cache/
 *.lock
 .lock
+!service/requirements.lock
+
+# Remote API runtime data
+/runtime/
 
 # Live preview direct-edit history (per-project, regenerated on edit)
 .live_edits.jsonl

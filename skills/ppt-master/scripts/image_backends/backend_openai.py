@@ -10,6 +10,7 @@ Configuration keys:
   OPENAI_BASE_URL  (optional) Custom API endpoint (e.g. http://127.0.0.1:3000/v1)
   OPENAI_MODEL     (optional) Model name (default: gpt-image-2)
   OPENAI_SIZE_PRESET         (optional) auto, legacy, gpt-image, gpt-image-2, or dall-e-2
+  OPENAI_SIZE_OVERRIDE       (optional) exact WIDTHxHEIGHT required by a compatible provider
   OPENAI_RESPONSE_FORMAT     (optional) auto, b64_json, url, or omit
   OPENAI_QUALITY             (optional) auto, omit, low, medium, high, standard, or hd
   OPENAI_OUTPUT_FORMAT       (optional) png, jpeg, or webp for GPT image models
@@ -39,8 +40,12 @@ configure_utf8_stdio()
 
 if __name__ == "__main__":
     print(__doc__)
-    print("Use via: python3 skills/ppt-master/scripts/image_gen.py \"prompt\" --backend openai")
-    raise SystemExit(0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1)
+    print(
+        'Use via: python3 skills/ppt-master/scripts/image_gen.py "prompt" --backend openai'
+    )
+    raise SystemExit(
+        0 if any(arg in {"-h", "--help", "help"} for arg in sys.argv[1:]) else 1
+    )
 
 import base64
 import mimetypes
@@ -69,29 +74,29 @@ from image_backends.backend_common import (
 # Aspect ratio -> DALL-E 3 / legacy compatible size mapping.
 # Unknown OpenAI-compatible models use this table to preserve old behavior.
 LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE = {
-    "1:1":  "1024x1024",
+    "1:1": "1024x1024",
     "16:9": "1792x1024",
     "9:16": "1024x1792",
-    "3:2":  "1536x1024",
-    "2:3":  "1024x1536",
-    "4:3":  "1536x1024",   # closest available
-    "3:4":  "1024x1536",   # closest available
-    "4:5":  "1024x1024",   # fallback to square
-    "5:4":  "1024x1024",   # fallback to square
-    "21:9": "1792x1024",   # closest wide format
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "4:3": "1536x1024",  # closest available
+    "3:4": "1024x1536",  # closest available
+    "4:5": "1024x1024",  # fallback to square
+    "5:4": "1024x1024",  # fallback to square
+    "21:9": "1792x1024",  # closest wide format
 }
 
 # GPT Image 1/1.5/mini officially support only square, landscape, portrait, or auto.
 GPT_IMAGE_LEGACY_ASPECT_RATIO_TO_SIZE = {
-    "1:1":  "1024x1024",
+    "1:1": "1024x1024",
     "16:9": "1536x1024",
     "9:16": "1024x1536",
-    "3:2":  "1536x1024",
-    "2:3":  "1024x1536",
-    "4:3":  "1536x1024",
-    "3:4":  "1024x1536",
-    "4:5":  "1024x1536",
-    "5:4":  "1536x1024",
+    "3:2": "1536x1024",
+    "2:3": "1024x1536",
+    "4:3": "1536x1024",
+    "3:4": "1024x1536",
+    "4:5": "1024x1536",
+    "5:4": "1536x1024",
     "21:9": "1536x1024",
 }
 
@@ -99,27 +104,51 @@ GPT_IMAGE_LEGACY_ASPECT_RATIO_TO_SIZE = {
 # the edge ratio is <= 3:1, and the total pixels are within model limits.
 GPT_IMAGE_2_SIZES = {
     "512px": {
-        "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
-        "3:2": "1248x832", "2:3": "832x1248", "4:3": "1024x768",
-        "3:4": "768x1024", "4:5": "896x1120", "5:4": "1120x896",
+        "1:1": "1024x1024",
+        "16:9": "1280x720",
+        "9:16": "720x1280",
+        "3:2": "1248x832",
+        "2:3": "832x1248",
+        "4:3": "1024x768",
+        "3:4": "768x1024",
+        "4:5": "896x1120",
+        "5:4": "1120x896",
         "21:9": "1280x544",
     },
     "1K": {
-        "1:1": "1024x1024", "16:9": "1280x720", "9:16": "720x1280",
-        "3:2": "1248x832", "2:3": "832x1248", "4:3": "1024x768",
-        "3:4": "768x1024", "4:5": "896x1120", "5:4": "1120x896",
+        "1:1": "1024x1024",
+        "16:9": "1280x720",
+        "9:16": "720x1280",
+        "3:2": "1248x832",
+        "2:3": "832x1248",
+        "4:3": "1024x768",
+        "3:4": "768x1024",
+        "4:5": "896x1120",
+        "5:4": "1120x896",
         "21:9": "1280x544",
     },
     "2K": {
-        "1:1": "2048x2048", "16:9": "2048x1152", "9:16": "1152x2048",
-        "3:2": "2016x1344", "2:3": "1344x2016", "4:3": "1920x1440",
-        "3:4": "1440x1920", "4:5": "1600x2000", "5:4": "2000x1600",
+        "1:1": "2048x2048",
+        "16:9": "2048x1152",
+        "9:16": "1152x2048",
+        "3:2": "2016x1344",
+        "2:3": "1344x2016",
+        "4:3": "1920x1440",
+        "3:4": "1440x1920",
+        "4:5": "1600x2000",
+        "5:4": "2000x1600",
         "21:9": "2560x1088",
     },
     "4K": {
-        "1:1": "2880x2880", "16:9": "3840x2160", "9:16": "2160x3840",
-        "3:2": "3520x2352", "2:3": "2352x3520", "4:3": "3264x2448",
-        "3:4": "2448x3264", "4:5": "2560x3200", "5:4": "3200x2560",
+        "1:1": "2880x2880",
+        "16:9": "3840x2160",
+        "9:16": "2160x3840",
+        "3:2": "3520x2352",
+        "2:3": "2352x3520",
+        "4:3": "3264x2448",
+        "3:4": "2448x3264",
+        "4:5": "2560x3200",
+        "5:4": "3200x2560",
         "21:9": "3840x1648",
     },
 }
@@ -136,9 +165,9 @@ VALID_ASPECT_RATIOS = list(LEGACY_COMPAT_ASPECT_RATIO_TO_SIZE.keys())
 # image_size -> quality mapping
 IMAGE_SIZE_TO_QUALITY = {
     "512px": "low",
-    "1K":    "medium",
-    "2K":    "high",
-    "4K":    "high",
+    "1K": "medium",
+    "2K": "high",
+    "4K": "high",
 }
 
 DEFAULT_MODEL = "gpt-image-2"
@@ -210,7 +239,9 @@ def _parse_size(size: str) -> tuple[int, int]:
         width_s, height_s = size.lower().split("x", 1)
         return int(width_s), int(height_s)
     except Exception as exc:
-        raise ValueError(f"Invalid image size '{size}'. Expected WIDTHxHEIGHT.") from exc
+        raise ValueError(
+            f"Invalid image size '{size}'. Expected WIDTHxHEIGHT."
+        ) from exc
 
 
 def _validate_gpt_image_2_size(size: str) -> None:
@@ -242,6 +273,14 @@ def _select_size(
     size_preset: str | None = None,
 ) -> str:
     """Select a model-compatible size while preserving legacy fallbacks."""
+    size_override = os.environ.get("OPENAI_SIZE_OVERRIDE", "").strip()
+    if size_override:
+        width, height = _parse_size(size_override)
+        if width <= 0 or height <= 0 or width > 8192 or height > 8192:
+            raise ValueError(
+                "OPENAI_SIZE_OVERRIDE edges must be between 1 and 8192 pixels."
+            )
+        return f"{width}x{height}"
     preset = size_preset or "auto"
     if preset in {"gpt-image-2"} or (preset == "auto" and _is_gpt_image_2(model)):
         size = GPT_IMAGE_2_SIZES[image_size][aspect_ratio]
@@ -279,9 +318,13 @@ def _read_env_int(name: str, minimum: int, maximum: int) -> int | None:
     try:
         parsed = int(value)
     except ValueError as exc:
-        raise ValueError(f"Invalid {name}='{value}'. Expected integer {minimum}-{maximum}.") from exc
+        raise ValueError(
+            f"Invalid {name}='{value}'. Expected integer {minimum}-{maximum}."
+        ) from exc
     if not (minimum <= parsed <= maximum):
-        raise ValueError(f"Invalid {name}={parsed}. Expected integer {minimum}-{maximum}.")
+        raise ValueError(
+            f"Invalid {name}={parsed}. Expected integer {minimum}-{maximum}."
+        )
     return parsed
 
 
@@ -305,7 +348,9 @@ def _gpt_image_options(model: str) -> tuple[dict, str]:
     background = _read_env_choice("OPENAI_BACKGROUND", GPT_IMAGE_BACKGROUNDS)
     if background:
         if _is_gpt_image_2(model) and background == "transparent":
-            raise ValueError("gpt-image-2 does not support OPENAI_BACKGROUND=transparent.")
+            raise ValueError(
+                "gpt-image-2 does not support OPENAI_BACKGROUND=transparent."
+            )
         options["background"] = background
 
     moderation = _read_env_choice("OPENAI_MODERATION", GPT_IMAGE_MODERATION_VALUES)
@@ -383,8 +428,9 @@ def _post_image_generation(api_key: str, base_url: str | None, request: dict) ->
         raise RuntimeError("OpenAI image generation returned invalid JSON.") from exc
 
 
-def _post_image_edit(api_key: str, base_url: str | None,
-                     data: dict, image_path: str) -> dict:
+def _post_image_edit(
+    api_key: str, base_url: str | None, data: dict, image_path: str
+) -> dict:
     headers = {"Authorization": f"Bearer {api_key}"}
     # GPT Image models take the image list field 'image[]'; dall-e-2 and other
     # OpenAI-compatible edit models use the singular 'image'.
@@ -413,10 +459,17 @@ def _post_image_edit(api_key: str, base_url: str | None,
 # ║  Image Generation                                               ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-def _generate_image(api_key: str, prompt: str,
-                    aspect_ratio: str = "1:1", image_size: str = "1K",
-                    output_dir: str = None, filename: str = None,
-                    model: str = DEFAULT_MODEL, base_url: str = None) -> str:
+
+def _generate_image(
+    api_key: str,
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    image_size: str = "1K",
+    output_dir: str = None,
+    filename: str = None,
+    model: str = DEFAULT_MODEL,
+    base_url: str = None,
+) -> str:
     """
     Image generation via OpenAI-compatible API.
 
@@ -508,13 +561,22 @@ def _generate_image(api_key: str, prompt: str,
         if image_url:
             return download_image(image_url, path)
 
-    raise RuntimeError("No image was generated. The server may have refused the request.")
+    raise RuntimeError(
+        "No image was generated. The server may have refused the request."
+    )
 
 
-def _edit_image(api_key: str, prompt: str, reference_image: str,
-                aspect_ratio: str = "1:1", image_size: str = "1K",
-                output_dir: str = None, filename: str = None,
-                model: str = DEFAULT_MODEL, base_url: str = None) -> str:
+def _edit_image(
+    api_key: str,
+    prompt: str,
+    reference_image: str,
+    aspect_ratio: str = "1:1",
+    image_size: str = "1K",
+    output_dir: str = None,
+    filename: str = None,
+    model: str = DEFAULT_MODEL,
+    base_url: str = None,
+) -> str:
     """
     Image-to-image edit via the OpenAI-compatible /v1/images/edits endpoint.
 
@@ -605,18 +667,26 @@ def _edit_image(api_key: str, prompt: str, reference_image: str,
         if image_url:
             return download_image(image_url, path)
 
-    raise RuntimeError("No image was returned. The server may have refused the edit request.")
+    raise RuntimeError(
+        "No image was returned. The server may have refused the edit request."
+    )
 
 
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  Public Entry Point                                             ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-def generate(prompt: str,
-             aspect_ratio: str = "1:1", image_size: str = "1K",
-             output_dir: str = None, filename: str = None,
-             model: str = None, max_retries: int = MAX_RETRIES,
-             reference_image: str = None) -> str:
+
+def generate(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    image_size: str = "1K",
+    output_dir: str = None,
+    filename: str = None,
+    model: str = None,
+    max_retries: int = MAX_RETRIES,
+    reference_image: str = None,
+) -> str:
     """
     OpenAI-compatible image generation (or image-to-image edit) with retry.
 
@@ -664,25 +734,46 @@ def generate(prompt: str,
     for attempt in range(max_retries + 1):
         try:
             if reference_image is not None:
-                return _edit_image(api_key, prompt, reference_image,
-                                   aspect_ratio, image_size, output_dir,
-                                   filename, model, base_url)
-            return _generate_image(api_key, prompt,
-                                   aspect_ratio, image_size, output_dir,
-                                   filename, model, base_url)
+                return _edit_image(
+                    api_key,
+                    prompt,
+                    reference_image,
+                    aspect_ratio,
+                    image_size,
+                    output_dir,
+                    filename,
+                    model,
+                    base_url,
+                )
+            return _generate_image(
+                api_key,
+                prompt,
+                aspect_ratio,
+                image_size,
+                output_dir,
+                filename,
+                model,
+                base_url,
+            )
         except Exception as e:
             last_error = e
             if attempt < max_retries and is_rate_limit_error(e):
                 delay = retry_delay(attempt, rate_limited=True)
-                print(f"\n  [WARN] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
-                      f"Waiting {delay}s before retry...")
+                print(
+                    f"\n  [WARN] Rate limit hit (attempt {attempt + 1}/{max_retries + 1}). "
+                    f"Waiting {delay}s before retry..."
+                )
                 time.sleep(delay)
             elif attempt < max_retries:
                 delay = retry_delay(attempt, rate_limited=False)
-                print(f"\n  [WARN] Error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                      f"Retrying in {delay}s...")
+                print(
+                    f"\n  [WARN] Error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
                 time.sleep(delay)
             else:
                 break
 
-    raise RuntimeError(f"Failed after {max_retries + 1} attempts. Last error: {last_error}")
+    raise RuntimeError(
+        f"Failed after {max_retries + 1} attempts. Last error: {last_error}"
+    )

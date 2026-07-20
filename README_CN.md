@@ -1,3 +1,39 @@
+# PPT Master Remote Workbench
+
+[English](./README.md) | 中文
+
+本仓库基于 [hugohe3/ppt-master](https://github.com/hugohe3/ppt-master) 扩展，保留原生可编辑 PPTX 生成流程，并增加可供用户和第三方系统使用的远程工作台。
+
+## 本仓库扩展
+
+- 聊天式 Web 工作台：上传资料、确认方案、查看生成进度、预览和下载 PPTX
+- 大屏预览：在预览区点击全屏图标，使用左右方向键翻页，按 `Esc` 退出
+- 远程 API：支持第三方创建任务、继续会话、读取事件和下载产物
+- 数据库认证：PostgreSQL 用户、会话和个人 API Key，服务端仅保存 Key 摘要
+- 后台任务：Redis 队列、Worker 心跳、任务恢复和实时 SSE 事件
+- AI 素材图：任务级受限 MCP 调用 Prism `gpt_image2`，供应商密钥不会进入任务命令环境
+
+## 快速启动远程工作台
+
+推荐使用 Ubuntu 24.04、Docker Engine 27+ 和 Docker Compose v2。复制 `.env.example` 为 `.env`，填写数据库密码、Codex 模型密钥、Prism 生图密钥和域名，然后执行：
+
+```bash
+git clone https://github.com/mirainya/ppt-master.git
+cd ppt-master
+cp .env.example .env
+docker compose up -d postgres redis
+docker compose run --rm api python -m service.migrate --show
+docker compose run --rm api python -m service.migrate --apply --confirm APPLY
+docker compose run --rm api python -m service.admin create --username admin
+docker compose up -d api worker caddy
+```
+
+完整配置、API 调用和恢复机制见 [`service/README.md`](./service/README.md)。本地前端开发使用 `cd frontend && npm install && npm run dev`。
+
+> `.env`、运行任务和构建产物均已加入 Git 忽略。提交代码前不要执行 `git add -f .env`。
+
+---
+
 # PPT Master — AI 生成原生 PowerPoint，支持任意文档输入
 
 [![Version](https://img.shields.io/github/v/release/hugohe3/ppt-master?label=version&color=blue)](https://github.com/hugohe3/ppt-master/releases)
@@ -51,6 +87,7 @@
 <p align="center">
   <a href="https://hugohe3.github.io/ppt-master/"><strong>在线预览</strong></a> ·
   <a href="./examples/"><strong>示例下载</strong></a> ·
+  <a href="./service/README.md"><strong>远程 API 部署</strong></a> ·
   <a href="./docs/zh/faq.md"><strong>常见问题</strong></a> ·
   <a href="./docs/zh/roadmap.md"><strong>路线图</strong></a>
 </p>

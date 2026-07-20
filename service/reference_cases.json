@@ -1,0 +1,50 @@
+[
+  {
+    "id": "editorial_architecture",
+    "label": "建筑编辑杂志",
+    "style": "大幅建筑摄影、编辑网格、米白纸面、黑字与暖金强调",
+    "tone": "克制、文化感、以图为主",
+    "best_for": "建筑、人物、文化、作品集、品牌故事",
+    "preview_path": "docs/assets/screenshots/preview_pritzker_2026.png"
+  },
+  {
+    "id": "swiss_grid",
+    "label": "瑞士网格",
+    "style": "严格模块网格、纯白纸面、黑色字体、少量朱红",
+    "tone": "理性、极简、强排版秩序",
+    "best_for": "设计教育、方法论、学术概念、简洁说明",
+    "preview_path": "docs/assets/screenshots/preview_swiss_grid.png"
+  },
+  {
+    "id": "data_journalism",
+    "label": "财经数据新闻",
+    "style": "深色信息图、新闻编辑排版、密集图表、暖白正文与财经红",
+    "tone": "冷静、可信、数据导向",
+    "best_for": "商业分析、行业报告、投融资、趋势研究",
+    "preview_path": "docs/assets/screenshots/preview_global_ai_capital.png"
+  },
+  {
+    "id": "glass_product",
+    "label": "毛玻璃产品界面",
+    "style": "深色产品界面、半透明面板、层次光影、清晰功能分区",
+    "tone": "现代、精致、数字产品感",
+    "best_for": "SaaS、AI 产品、技术演示、功能发布",
+    "preview_path": "docs/assets/screenshots/preview_glassmorphism_demo.png"
+  },
+  {
+    "id": "memphis_pop",
+    "label": "孟菲斯波普",
+    "style": "奶油底、几何碎片、高饱和撞色、粗描边与活泼节奏",
+    "tone": "张扬、年轻、庆典感",
+    "best_for": "活动、音乐、消费品牌、年轻受众",
+    "preview_path": "docs/assets/screenshots/preview_sugar_rush_memphis.png"
+  },
+  {
+    "id": "risograph_zine",
+    "label": "独立杂志拼贴",
+    "style": "Riso 印刷质感、拼贴图文、手工刊物结构、有限色套印",
+    "tone": "人文、独立、富有触感",
+    "best_for": "书店、城市文化、艺术项目、旅行与社区内容",
+    "preview_path": "docs/assets/screenshots/preview_indie_bookstore_zine.png"
+  }
+]

@@ -1,3 +1,39 @@
+# PPT Master Remote Workbench
+
+English | [中文](./README_CN.md)
+
+This repository extends [hugohe3/ppt-master](https://github.com/hugohe3/ppt-master) with a remote, multi-user workbench while preserving the native editable PPTX generation workflow.
+
+## Repository Extensions
+
+- Conversational web workbench for source upload, proposal confirmation, live progress, preview, and downloads
+- Full-screen slide preview with arrow-key navigation and `Esc` to exit
+- Authenticated remote API for third-party job creation, continuation, event streaming, and artifact download
+- PostgreSQL users, sessions, and personal API keys; only API-key digests are stored
+- Redis queue, worker heartbeat, task recovery, and live SSE events
+- Task-scoped MCP image generation through Prism `gpt_image2` without exposing provider credentials to task commands
+
+## Remote Workbench Quick Start
+
+Ubuntu 24.04, Docker Engine 27+, and Docker Compose v2 are recommended. Copy `.env.example` to `.env`, configure the database password, Codex model key, Prism image key, and domain, then run:
+
+```bash
+git clone https://github.com/mirainya/ppt-master.git
+cd ppt-master
+cp .env.example .env
+docker compose up -d postgres redis
+docker compose run --rm api python -m service.migrate --show
+docker compose run --rm api python -m service.migrate --apply --confirm APPLY
+docker compose run --rm api python -m service.admin create --username admin
+docker compose up -d api worker caddy
+```
+
+See [`service/README.md`](./service/README.md) for configuration, API usage, and recovery behavior. For local frontend development, run `cd frontend && npm install && npm run dev`.
+
+> `.env`, runtime jobs, and build outputs are ignored by Git. Never force-add `.env`.
+
+---
+
 # PPT Master — AI generates native PowerPoint from any document
 
 [![Version](https://img.shields.io/github/v/release/hugohe3/ppt-master?label=version&color=blue)](https://github.com/hugohe3/ppt-master/releases)
@@ -51,6 +87,7 @@ Thanks to [Kimi](https://www.kimi.com/code/?aff=ppt-master) for sponsoring this 
 <p align="center">
   <a href="https://hugohe3.github.io/ppt-master/"><strong>Live Demo</strong></a> ·
   <a href="./examples/"><strong>Examples</strong></a> ·
+  <a href="./service/README.md"><strong>Remote API</strong></a> ·
   <a href="./docs/faq.md"><strong>FAQ</strong></a> ·
   <a href="./docs/roadmap.md"><strong>Roadmap</strong></a>
 </p>

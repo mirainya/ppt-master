@@ -67,7 +67,7 @@ openpyxl>=3.1.0
 # fix_image_aspect.py - 为 PowerPoint SVG 渲染诊断归一化图片框
 # gemini_watermark_remover.py - Remove watermarks from Gemini-generated images
 # gemini_watermark_remover.py - 去除 Gemini 生成图片的水印
-Pillow>=9.0.0
+Pillow>=12.3.0
 numpy>=1.20.0
 
 # ─────────────────────────────────────────────────────────────
