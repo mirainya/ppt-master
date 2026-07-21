@@ -44,10 +44,10 @@ import type {
   ApiKey,
   Artifact,
   AssetRole,
-  Confirmation,
   CreatedApiKey,
   Job,
   JobEvent,
+  JobMessage,
   JobStatus,
   PendingFile,
   User,
@@ -163,7 +163,7 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [events, setEvents] = useState<JobEvent[]>([]);
-  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [messages, setMessages] = useState<JobMessage[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [previewUrls, setPreviewUrls] = useState<Record<string, string>>({});
   const [selectedPreviewId, setSelectedPreviewId] = useState<string | null>(
@@ -179,7 +179,6 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const proposalRef = useRef<HTMLDivElement>(null);
   const previewPaneRef = useRef<HTMLElement>(null);
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
 
@@ -265,10 +264,10 @@ export default function App() {
   const refreshJob = useCallback(
     async (jobId: string) => {
       if (!client) return;
-      const [job, nextConfirmation, nextArtifacts] = await Promise.all([
+      const [job, nextArtifacts, nextMessages] = await Promise.all([
         client.getJob(jobId),
-        client.getConfirmation(jobId),
         client.listArtifacts(jobId),
+        client.listMessages(jobId),
       ]);
       setJobs((current) => {
         const others = current.filter((item) => item.id !== job.id);
@@ -277,8 +276,8 @@ export default function App() {
             Date.parse(right.updated_at) - Date.parse(left.updated_at),
         );
       });
-      setConfirmation(nextConfirmation);
       setArtifacts(nextArtifacts);
+      setMessages(nextMessages);
     },
     [client],
   );
@@ -305,14 +304,14 @@ export default function App() {
   useEffect(() => {
     if (!client || !selectedId) {
       setEvents([]);
-      setConfirmation(null);
       setArtifacts([]);
+      setMessages([]);
       return;
     }
     const controller = new AbortController();
     setEvents([]);
-    setConfirmation(null);
     setArtifacts([]);
+    setMessages([]);
     refreshJob(selectedId).catch((reason: unknown) => {
       setError(reason instanceof Error ? reason.message : "任务读取失败");
     });
@@ -405,20 +404,11 @@ export default function App() {
   }, [client, selectedId, previewArtifacts.map((item) => item.id).join(",")]);
 
   useEffect(() => {
-    if (confirmation?.proposal.markdown) return;
     messagesEndRef.current?.scrollIntoView({
       behavior: "smooth",
       block: "end",
     });
-  }, [events, confirmation?.proposal.markdown]);
-
-  useEffect(() => {
-    if (!confirmation?.proposal.markdown) return;
-    proposalRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "start",
-    });
-  }, [selectedId, Boolean(confirmation?.proposal.markdown)]);
+  }, [events, messages]);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -485,6 +475,7 @@ export default function App() {
       setPasswordDraft("");
       setJobs([]);
       setSelectedId(null);
+      setMessages([]);
       setApiKeyDialogOpen(false);
     }
   }
@@ -542,8 +533,8 @@ export default function App() {
   function startNewJob() {
     setSelectedId(null);
     setEvents([]);
-    setConfirmation(null);
     setArtifacts([]);
+    setMessages([]);
     setMessage("");
     setFiles([]);
     setSidebarOpen(false);
@@ -833,16 +824,22 @@ export default function App() {
           )}
           {selectedJob && (
             <>
-              <div className="message-row user-message">
-                <div className="message-bubble">{selectedJob.prompt}</div>
-              </div>
-              {confirmation?.response?.message?.trim() && (
-                <div className="message-row user-message revision-message">
-                  <div className="message-bubble">
-                    {confirmation.response.message}
-                  </div>
+              {messages.map((item) => (
+                <div
+                  className={`message-row ${
+                    item.role === "user" ? "user-message" : "assistant-message"
+                  }`}
+                  key={item.id}
+                >
+                  {item.role === "user" ? (
+                    <div className="message-bubble">{item.content}</div>
+                  ) : (
+                    <div className="message-bubble markdown-body">
+                      <ReactMarkdown>{item.content}</ReactMarkdown>
+                    </div>
+                  )}
                 </div>
-              )}
+              ))}
               {selectedJob.status === "failed" && (
                 <div className="failure-status" role="alert">
                   <div className="failure-status-icon">
@@ -912,26 +909,6 @@ export default function App() {
                   <span>{referenceEvent.message}</span>
                 </div>
               )}
-              {confirmation?.proposal.markdown && (
-                <div
-                  ref={proposalRef}
-                  className="message-row assistant-message"
-                >
-                  <div className="message-bubble markdown-body">
-                    <ReactMarkdown>
-                      {confirmation.proposal.markdown}
-                    </ReactMarkdown>
-                  </div>
-                </div>
-              )}
-              {confirmation?.response?.message &&
-                !/^\?+$/.test(confirmation.response.message) && (
-                  <div className="message-row user-message">
-                    <div className="message-bubble">
-                      {confirmation.response.message}
-                    </div>
-                  </div>
-                )}
             </>
           )}
           <div ref={messagesEndRef} />

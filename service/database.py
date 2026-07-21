@@ -52,6 +52,7 @@ class Database:
             """
             SELECT
                 to_regclass('public.jobs') AS jobs,
+                to_regclass('public.job_messages') AS job_messages,
                 to_regclass('public.users') AS users,
                 to_regclass('public.user_sessions') AS user_sessions,
                 to_regclass('public.user_api_keys') AS user_api_keys

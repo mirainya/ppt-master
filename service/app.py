@@ -48,6 +48,7 @@ from service.schemas import (
     ConfirmationRead,
     ConfirmationSubmit,
     JobMessageSubmit,
+    JobMessageRead,
     JobRead,
     JobRoute,
     JobStatus,
@@ -160,15 +161,29 @@ async def _require_job(
 
 def _select_artifacts(
     artifacts: list[dict],
-    live_names: set[str],
+    live_paths: set[str],
 ) -> list[dict]:
+    normalized: list[dict] = []
+    for artifact in artifacts:
+        record = dict(artifact)
+        path_parts = record["storage_path"].replace("\\", "/").split("/")
+        suffix = record["filename"].rsplit(".", 1)[-1].lower()
+        is_page_preview = (
+            suffix == "svg"
+            and "svg_output" in path_parts
+            and "backup" not in path_parts
+        )
+        if record["kind"] == "preview" and not is_page_preview:
+            record["kind"] = "asset"
+        normalized.append(record)
+
     records = [
         artifact
-        for artifact in artifacts
-        if artifact["kind"] == "preview" and artifact["filename"] not in live_names
+        for artifact in normalized
+        if artifact["kind"] == "preview" and artifact["storage_path"] not in live_paths
     ]
     deliverables: dict[tuple[str, str], dict] = {}
-    for artifact in artifacts:
+    for artifact in normalized:
         if artifact["kind"] == "preview":
             continue
         suffix = artifact["filename"].rsplit(".", 1)[-1].lower()
@@ -394,6 +409,19 @@ async def get_job(request: Request, job_id: UUID, user: CurrentUser) -> dict:
 
 
 @app.get(
+    "/v1/jobs/{job_id}/messages",
+    response_model=list[JobMessageRead],
+)
+async def list_messages(
+    request: Request,
+    job_id: UUID,
+    user: CurrentUser,
+) -> list[dict]:
+    await _require_job(request, job_id, user)
+    return await _repository(request).list_messages(job_id)
+
+
+@app.get(
     "/v1/jobs/{job_id}/events",
 )
 async def stream_events(
@@ -461,7 +489,8 @@ async def submit_confirmation(
     confirmation = await _repository(request).submit_confirmation(
         job_id,
         submission.approved,
-        submission.message,
+        submission.message.strip()
+        or ("确认方案" if submission.approved else "请修改方案"),
     )
     if confirmation is None:
         raise HTTPException(
@@ -593,8 +622,8 @@ async def list_artifacts(
     repository = _repository(request)
     existing = await repository.list_artifacts(job_id)
     live_previews = request.app.state.storage.discover_live_previews(job_id)
-    live_names = {preview.filename for preview in live_previews}
-    records = _select_artifacts(existing, live_names)
+    live_paths = {preview.relative_path for preview in live_previews}
+    records = _select_artifacts(existing, live_paths)
     for preview in live_previews:
         path = request.app.state.storage.resolve_job_file(job_id, preview.relative_path)
         records.append(

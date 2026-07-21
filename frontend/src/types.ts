@@ -49,6 +49,14 @@ export interface JobEvent {
   created_at: string;
 }
 
+export interface JobMessage {
+  id: number;
+  job_id: string;
+  role: "user" | "assistant" | "system" | string;
+  content: string;
+  created_at: string;
+}
+
 export interface Confirmation {
   job_id: string;
   proposal: { markdown?: string; [key: string]: unknown };

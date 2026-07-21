@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4, uuid5
@@ -41,6 +42,30 @@ ALLOWED_SOURCE_SUFFIXES = {
 }
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 ASSET_ROLES = {"source", "reference"}
+_PAGE_NUMBER_PATTERNS = (
+    re.compile(r"第\s*(\d+)\s*(?:页|張|张(?:\s*(?:PPT|幻灯片))?)", re.IGNORECASE),
+    re.compile(
+        r"第\s*([零〇一二两三四五六七八九十百千]+)\s*"
+        r"(?:页|張|张(?:\s*(?:PPT|幻灯片))?)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:slide|page)\s*(?:#|no\.?\s*)?(\d+)", re.IGNORECASE),
+)
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_UNITS = {"十": 10, "百": 100, "千": 1000}
 
 
 @dataclass
@@ -66,6 +91,28 @@ class WorkspaceProgress:
     image_generation_state: str | None
     image_generation_updated: bool
     image_generation_count: int
+
+
+@dataclass(frozen=True)
+class RevisionScope:
+    """Original SVG state for one strictly scoped page revision."""
+
+    target_page: int
+    target_svg: str
+    instruction: str
+    page_order: tuple[str, ...]
+    svg_hashes: dict[str, str]
+    protected_files: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "target_page": self.target_page,
+            "target_svg": self.target_svg,
+            "instruction": self.instruction,
+            "page_order": list(self.page_order),
+            "svg_hashes": self.svg_hashes,
+            "protected_files": list(self.protected_files),
+        }
 
 
 class JobStorage:
@@ -237,6 +284,134 @@ class JobStorage:
             preview.id = uuid5(job_id, preview.relative_path)
         return previews
 
+    def prepare_revision_scope(
+        self,
+        job_id: UUID,
+        instruction: str,
+        protected_paths: list[str] | None = None,
+    ) -> RevisionScope | None:
+        """Snapshot SVG hashes when an instruction names exactly one page."""
+        scope_path = self.prepare_job(job_id) / "control" / "revision_scope.json"
+        target_page = _extract_single_page_number(instruction)
+        if target_page is None:
+            scope_path.unlink(missing_ok=True)
+            return None
+
+        pages = self._svg_pages(job_id)
+        if not pages:
+            raise ValueError("当前任务还没有可修改的 PPT 页面")
+        if target_page > len(pages):
+            raise ValueError(
+                f"修改指令指定第 {target_page} 页，但当前 PPT 只有 {len(pages)} 页"
+            )
+
+        page_order = tuple(
+            path.relative_to(self.job_dir(job_id)).as_posix() for path in pages
+        )
+        protected_files = set(page_order)
+        for relative_path in protected_paths or []:
+            try:
+                self.resolve_job_file(job_id, relative_path)
+            except (FileNotFoundError, ValueError):
+                continue
+            protected_files.add(relative_path)
+
+        baseline_dir = self.prepare_job(job_id) / "control" / "revision_baseline"
+        if baseline_dir.exists():
+            shutil.rmtree(baseline_dir)
+        for relative_path in sorted(protected_files):
+            source = self.resolve_job_file(job_id, relative_path)
+            destination = baseline_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
+        scope = RevisionScope(
+            target_page=target_page,
+            target_svg=page_order[target_page - 1],
+            instruction=instruction,
+            page_order=page_order,
+            svg_hashes={
+                relative_path: self._sha256(self.job_dir(job_id) / relative_path)
+                for relative_path in page_order
+            },
+            protected_files=tuple(sorted(protected_files)),
+        )
+        scope_path.write_text(
+            json.dumps(scope.as_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return scope
+
+    def load_revision_scope(self, job_id: UUID) -> RevisionScope | None:
+        """Load a previous revision snapshot after an interrupted worker run."""
+        scope_path = self.prepare_job(job_id) / "control" / "revision_scope.json"
+        if not scope_path.is_file():
+            return None
+        try:
+            data = json.loads(scope_path.read_text(encoding="utf-8"))
+            page_order = tuple(
+                _require_relative_path(str(path)) for path in data["page_order"]
+            )
+            svg_hashes = {
+                _require_relative_path(str(path)): str(digest)
+                for path, digest in data["svg_hashes"].items()
+            }
+            return RevisionScope(
+                target_page=int(data["target_page"]),
+                target_svg=_require_relative_path(str(data["target_svg"])),
+                instruction=str(data["instruction"]),
+                page_order=page_order,
+                svg_hashes=svg_hashes,
+                protected_files=tuple(
+                    _require_relative_path(str(path))
+                    for path in data.get("protected_files", data["page_order"])
+                ),
+            )
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def revision_scope_violations(
+        self,
+        job_id: UUID,
+        scope: RevisionScope,
+    ) -> list[str]:
+        """Report page set, order, or non-target SVG changes."""
+        page_order = tuple(
+            path.relative_to(self.job_dir(job_id)).as_posix()
+            for path in self._svg_pages(job_id)
+        )
+        violations: list[str] = []
+        if page_order != scope.page_order:
+            violations.append("页面数量、文件名或顺序发生变化")
+
+        for relative_path, expected_hash in scope.svg_hashes.items():
+            if relative_path == scope.target_svg:
+                continue
+            path = self.job_dir(job_id) / relative_path
+            if not path.is_file() or self._sha256(path) != expected_hash:
+                violations.append(f"非目标页面被修改：{relative_path}")
+        return violations
+
+    def restore_revision_scope(self, job_id: UUID, scope: RevisionScope) -> None:
+        """Restore original pages and previously published files after rejection."""
+        job_dir = self.job_dir(job_id)
+        baseline_dir = job_dir / "control" / "revision_baseline"
+        original_pages = set(scope.page_order)
+        for page in self._svg_pages(job_id):
+            relative_path = page.relative_to(job_dir).as_posix()
+            if relative_path not in original_pages:
+                page.unlink()
+
+        for relative_path in scope.protected_files:
+            source = baseline_dir / relative_path
+            self._require_child(source.resolve(), baseline_dir.resolve())
+            if not source.is_file():
+                continue
+            destination = job_dir / relative_path
+            self._require_child(destination.resolve(), job_dir)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+
     @staticmethod
     def asset_role(relative_path: str) -> str:
         parts = Path(relative_path).parts
@@ -244,9 +419,66 @@ class JobStorage:
             return parts[1]
         return "source"
 
+    def _svg_pages(self, job_id: UUID) -> list[Path]:
+        workspace = self.job_dir(job_id) / "workspace"
+        return sorted(
+            {
+                path
+                for path in workspace.glob("**/svg_output/*.svg")
+                if "backup" not in path.relative_to(workspace).parts
+            },
+            key=lambda path: path.relative_to(workspace).as_posix(),
+        )
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as input_file:
+            while chunk := input_file.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
     @staticmethod
     def _require_child(path: Path, parent: Path) -> None:
         try:
             path.relative_to(parent)
         except ValueError as exc:
             raise ValueError("path escapes the task directory") from exc
+
+
+def _extract_single_page_number(instruction: str) -> int | None:
+    page_numbers: set[int] = set()
+    for index, pattern in enumerate(_PAGE_NUMBER_PATTERNS):
+        for match in pattern.finditer(instruction):
+            value = (
+                int(match.group(1))
+                if index != 1
+                else _parse_chinese_number(match.group(1))
+            )
+            if value > 0:
+                page_numbers.add(value)
+    return next(iter(page_numbers)) if len(page_numbers) == 1 else None
+
+
+def _parse_chinese_number(value: str) -> int:
+    if all(character in _CHINESE_DIGITS for character in value):
+        return int("".join(str(_CHINESE_DIGITS[character]) for character in value))
+
+    total = 0
+    digit = 0
+    for character in value:
+        if character in _CHINESE_DIGITS:
+            digit = _CHINESE_DIGITS[character]
+            continue
+        unit = _CHINESE_UNITS[character]
+        total += (digit or 1) * unit
+        digit = 0
+    return total + digit
+
+
+def _require_relative_path(value: str) -> str:
+    """Reject absolute or parent-traversing paths in a revision manifest."""
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError("revision scope contains an unsafe relative path")
+    return path.as_posix()

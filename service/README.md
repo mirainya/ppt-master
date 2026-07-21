@@ -99,8 +99,12 @@ facts. The Strategist may also select up to two cases from the built-in reviewed
 case ids and uploaded references are recorded in `control/references.json` and emitted as a
 `references` task event.
 
-Use `GET /v1/jobs/{id}/events` for SSE progress. Submit the blocking Strategist decision through
-`POST /v1/jobs/{id}/confirmation`, then download outputs from the artifact endpoints.
+Use `GET /v1/jobs/{id}/events` for SSE progress and `GET /v1/jobs/{id}/messages` for the complete
+chat history. Submit the blocking Strategist decision through `POST /v1/jobs/{id}/confirmation`,
+then download outputs from the artifact endpoints.
+
+When a revision names one page, such as `修改第 2 页`, the worker records the original SVG hashes
+and rejects the result if another page changes or the page count/order changes.
 
 ## Task Recovery
 

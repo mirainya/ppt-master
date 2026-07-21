@@ -78,6 +78,16 @@ class JobEventRead(BaseModel):
     created_at: datetime
 
 
+class JobMessageRead(BaseModel):
+    """One user, assistant, or system turn in task order."""
+
+    id: int
+    job_id: UUID
+    role: str
+    content: str
+    created_at: datetime
+
+
 class ConfirmationRead(BaseModel):
     """Proposal and optional user decision for a task."""
 

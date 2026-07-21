@@ -50,6 +50,7 @@ class JobRepository:
                     "Task accepted",
                     {"progress": 0},
                 )
+                await self._add_message(connection, job_id, "user", prompt)
         return dict(record)
 
     async def get_job(self, job_id: UUID) -> dict[str, Any] | None:
@@ -160,6 +161,28 @@ class JobRepository:
         )
         return [dict(record) for record in records]
 
+    async def list_messages(self, job_id: UUID) -> list[dict[str, Any]]:
+        records = await self.database.require_pool().fetch(
+            "SELECT * FROM job_messages WHERE job_id = $1 ORDER BY id ASC",
+            job_id,
+        )
+        return [dict(record) for record in records]
+
+    async def add_message(
+        self,
+        job_id: UUID,
+        role: str,
+        content: str,
+    ) -> dict[str, Any] | None:
+        content = content.strip()
+        if not content:
+            return None
+        if role not in {"user", "assistant", "system"}:
+            raise ValueError(f"unsupported message role: {role}")
+        async with self.database.require_pool().acquire() as connection:
+            record = await self._add_message(connection, job_id, role, content)
+        return dict(record)
+
     async def add_asset(self, job_id: UUID, stored_file: StoredFile) -> dict[str, Any]:
         record = await self.database.require_pool().fetchrow(
             """
@@ -185,18 +208,32 @@ class JobRepository:
         )
         return [dict(record) for record in records]
 
-    async def set_proposal(self, job_id: UUID, proposal: dict[str, Any]) -> None:
-        await self.database.require_pool().execute(
-            """
-            INSERT INTO job_confirmations (job_id, proposal, status)
-            VALUES ($1, $2, 'pending')
-            ON CONFLICT (job_id) DO UPDATE
-            SET proposal = EXCLUDED.proposal, response = NULL, status = 'pending',
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            job_id,
-            proposal,
-        )
+    async def set_proposal(
+        self,
+        job_id: UUID,
+        proposal: dict[str, Any],
+        assistant_message: str,
+    ) -> None:
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO job_confirmations (job_id, proposal, status)
+                    VALUES ($1, $2, 'pending')
+                    ON CONFLICT (job_id) DO UPDATE
+                    SET proposal = EXCLUDED.proposal, response = NULL, status = 'pending',
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    job_id,
+                    proposal,
+                )
+                if assistant_message.strip():
+                    await self._add_message(
+                        connection,
+                        job_id,
+                        "assistant",
+                        assistant_message.strip(),
+                    )
 
     async def get_confirmation(self, job_id: UUID) -> dict[str, Any] | None:
         record = await self.database.require_pool().fetchrow(
@@ -212,17 +249,21 @@ class JobRepository:
         message: str,
     ) -> dict[str, Any] | None:
         response = {"approved": approved, "message": message}
-        record = await self.database.require_pool().fetchrow(
-            """
-            UPDATE job_confirmations
-            SET response = $2, status = $3, updated_at = CURRENT_TIMESTAMP
-            WHERE job_id = $1 AND status = 'pending'
-            RETURNING *
-            """,
-            job_id,
-            response,
-            "approved" if approved else "revision_requested",
-        )
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    UPDATE job_confirmations
+                    SET response = $2, status = $3, updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = $1 AND status = 'pending'
+                    RETURNING *
+                    """,
+                    job_id,
+                    response,
+                    "approved" if approved else "revision_requested",
+                )
+                if record:
+                    await self._add_message(connection, job_id, "user", message)
         return dict(record) if record else None
 
     async def consume_confirmation(self, job_id: UUID) -> dict[str, Any] | None:
@@ -239,34 +280,41 @@ class JobRepository:
 
     async def prepare_resume(self, job_id: UUID, message: str) -> dict[str, Any] | None:
         response = {"approved": True, "message": message}
-        record = await self.database.require_pool().fetchrow(
-            """
-            UPDATE job_confirmations
-            SET response = $2, status = 'approved',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE job_id = $1
-            RETURNING *
-            """,
-            job_id,
-            response,
-        )
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    UPDATE job_confirmations
+                    SET response = $2, status = 'approved',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = $1
+                    RETURNING *
+                    """,
+                    job_id,
+                    response,
+                )
+                if record:
+                    await self._add_message(connection, job_id, "user", message)
         return dict(record) if record else None
 
     async def prepare_restart(self, job_id: UUID, message: str) -> dict[str, Any]:
         """Store an instruction for a failed task that has no resumable thread."""
         response = {"approved": True, "message": message}
-        record = await self.database.require_pool().fetchrow(
-            """
-            INSERT INTO job_confirmations (job_id, proposal, response, status)
-            VALUES ($1, '{}'::jsonb, $2, 'approved')
-            ON CONFLICT (job_id) DO UPDATE
-            SET response = EXCLUDED.response, status = 'approved',
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING *
-            """,
-            job_id,
-            response,
-        )
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    INSERT INTO job_confirmations (job_id, proposal, response, status)
+                    VALUES ($1, '{}'::jsonb, $2, 'approved')
+                    ON CONFLICT (job_id) DO UPDATE
+                    SET response = EXCLUDED.response, status = 'approved',
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING *
+                    """,
+                    job_id,
+                    response,
+                )
+                await self._add_message(connection, job_id, "user", message)
         return dict(record)
 
     async def request_cancel(self, job_id: UUID) -> dict[str, Any] | None:
@@ -356,6 +404,24 @@ class JobRepository:
                 message,
                 data or {},
             )
+
+    @staticmethod
+    async def _add_message(
+        connection: asyncpg.Connection,
+        job_id: UUID,
+        role: str,
+        content: str,
+    ) -> asyncpg.Record:
+        return await connection.fetchrow(
+            """
+            INSERT INTO job_messages (job_id, role, content)
+            VALUES ($1, $2, $3)
+            RETURNING *
+            """,
+            job_id,
+            role,
+            content,
+        )
 
     @staticmethod
     async def _add_event(

@@ -5,6 +5,7 @@ import type {
   CreatedApiKey,
   Job,
   JobEvent,
+  JobMessage,
   PendingFile,
   User,
 } from "./types";
@@ -78,6 +79,10 @@ export class ApiClient {
 
   getJob(jobId: string): Promise<Job> {
     return this.request<Job>(`/v1/jobs/${jobId}`);
+  }
+
+  listMessages(jobId: string): Promise<JobMessage[]> {
+    return this.request<JobMessage[]>(`/v1/jobs/${jobId}/messages`);
   }
 
   createJob(prompt: string, files: PendingFile[]): Promise<Job> {

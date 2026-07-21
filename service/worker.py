@@ -16,7 +16,7 @@ from service.queue import JobClaim, JobQueue
 from service.reference_catalog import reference_case_labels
 from service.repository import JobRepository
 from service.schemas import JobStatus, TERMINAL_STATUSES
-from service.storage import JobStorage
+from service.storage import JobStorage, RevisionScope
 
 
 logger = logging.getLogger(__name__)
@@ -136,10 +136,13 @@ async def _record_artifacts(
     }
     for stored_file in unique_files.values():
         suffix = Path(stored_file.filename).suffix.lower()
+        parts = Path(stored_file.relative_path).parts
         if suffix == ".pptx":
             kind = "pptx"
-        elif suffix in {".svg", ".png", ".jpg", ".jpeg"}:
+        elif suffix == ".svg" and "svg_output" in parts and "backup" not in parts:
             kind = "preview"
+        elif suffix in {".svg", ".png", ".jpg", ".jpeg", ".webp"}:
+            kind = "asset"
         else:
             kind = "document"
         await repository.add_artifact(job_id, kind, stored_file)
@@ -194,8 +197,11 @@ async def _process_job(
             logger.exception("Could not persist progress for task %s", job_id)
 
     assets = await repository.list_assets(job_id)
+    published_artifacts = await repository.list_artifacts(job_id)
+    published_paths = [artifact["storage_path"] for artifact in published_artifacts]
     source_paths, reference_paths, reference_names = _split_assets(assets, storage)
 
+    revision_scope: RevisionScope | None = None
     if not session_id:
         restart = await repository.consume_confirmation(job_id)
         prompt = job["prompt"]
@@ -238,11 +244,32 @@ async def _process_job(
                 "The worker was interrupted. Continue from the existing task files "
                 "and current workflow stage without repeating completed work."
             )
+            revision_scope = storage.load_revision_scope(job_id)
         else:
             response = confirmation.get("response")
             message = response.get("message", "") if response else "Continue the task."
             if response and response.get("approved"):
                 message = message or "Approved. Continue with the confirmed proposal."
+            try:
+                revision_scope = storage.prepare_revision_scope(
+                    job_id,
+                    message,
+                    published_paths,
+                )
+            except ValueError as exc:
+                failure_message = str(exc)
+                await repository.add_message(job_id, "assistant", failure_message)
+                await repository.set_status(
+                    job_id,
+                    JobStatus.FAILED,
+                    job["progress"],
+                    failure_message,
+                    error={
+                        "code": "invalid_revision_scope",
+                        "message": failure_message,
+                    },
+                )
+                return
         available_source_paths = [
             path for path in source_paths if (job_dir / path).is_file()
         ]
@@ -262,7 +289,32 @@ async def _process_job(
             message,
             should_cancel,
             record_progress,
+            revision_scope,
         )
+
+    if revision_scope is not None:
+        violations = storage.revision_scope_violations(job_id, revision_scope)
+        if violations:
+            try:
+                storage.restore_revision_scope(job_id, revision_scope)
+            except OSError as exc:
+                violations.append(f"恢复原文件失败：{exc}")
+            failure_message = "单页修改校验失败：" + "；".join(violations)
+            await repository.add_message(job_id, "assistant", failure_message)
+            await repository.set_status(
+                job_id,
+                JobStatus.FAILED,
+                job["progress"],
+                failure_message,
+                error={
+                    "code": "revision_scope_violation",
+                    "message": failure_message,
+                    "target_page": revision_scope.target_page,
+                    "target_svg": revision_scope.target_svg,
+                    "violations": violations,
+                },
+            )
+            return
 
     await _record_reference_usage(
         job_id,
@@ -276,7 +328,10 @@ async def _process_job(
 
     if result.phase == "awaiting_confirmation":
         proposal = result.proposal or {"message": result.message}
-        await repository.set_proposal(job_id, proposal)
+        assistant_message = str(
+            proposal.get("markdown") or proposal.get("message") or result.message
+        ).strip()
+        await repository.set_proposal(job_id, proposal, assistant_message)
         await repository.set_status(
             job_id,
             JobStatus.AWAITING_CONFIRMATION,
@@ -284,6 +339,7 @@ async def _process_job(
             result.message,
         )
     elif result.phase == "awaiting_asset":
+        await repository.add_message(job_id, "assistant", result.message)
         await repository.set_status(
             job_id, JobStatus.AWAITING_ASSET, 45, result.message
         )
@@ -292,8 +348,10 @@ async def _process_job(
             job_id, JobStatus.VALIDATING, 90, "Collecting outputs"
         )
         await _record_artifacts(job_id, result, repository, storage)
+        await repository.add_message(job_id, "assistant", result.message)
         await repository.set_status(job_id, JobStatus.SUCCEEDED, 100, result.message)
     else:
+        await repository.add_message(job_id, "assistant", result.message)
         await repository.set_status(
             job_id,
             JobStatus.FAILED,

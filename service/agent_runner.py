@@ -22,6 +22,7 @@ from openai_codex import (
 
 from service.config import Settings
 from service.reference_catalog import ReferenceCase, load_reference_cases
+from service.storage import RevisionScope
 
 
 _RESULT_SCHEMA = {
@@ -200,6 +201,7 @@ Use paths relative to the task directory in `artifact_paths`.
         message: str,
         should_cancel: Callable[[], Awaitable[bool]],
         on_progress: Callable[[str, dict[str, str]], Awaitable[None]],
+        revision_scope: RevisionScope | None = None,
     ) -> RunnerResult:
         reference_catalog = json.dumps(
             [
@@ -209,9 +211,23 @@ Use paths relative to the task directory in `artifact_paths`.
             ensure_ascii=False,
             indent=2,
         )
+        scope_instruction = ""
+        if revision_scope is not None:
+            scope_instruction = f"""
+
+Strict single-slide revision scope:
+- Modify only slide {revision_scope.target_page}: {revision_scope.target_svg}
+- Do not modify any other file under svg_output/.
+- Do not add, delete, rename, or reorder SVG pages.
+- Keep the page count and page order unchanged.
+- Supporting image and export files may change only as needed for the target slide.
+- The service verifies every svg_output file after this turn and rejects the result if this scope is violated.
+""".rstrip()
+
         instruction = f"""
 The remote user sent this message:
 {json.dumps(message, ensure_ascii=False)}
+{scope_instruction}
 
 Curated visual reference catalog:
 {reference_catalog}
