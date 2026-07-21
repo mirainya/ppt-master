@@ -272,16 +272,28 @@ class JobStorage:
 
     def discover_live_previews(self, job_id: UUID) -> list[StoredFile]:
         workspace = self.job_dir(job_id) / "workspace"
-        candidates = sorted(
+        output_pages = sorted(
             {
                 path
                 for path in workspace.glob("**/svg_output/*.svg")
                 if "backup" not in path.relative_to(workspace).parts
             }
         )
-        previews = [self.describe_existing(job_id, path) for path in candidates]
-        for preview in previews:
-            preview.id = uuid5(job_id, preview.relative_path)
+        previews: list[StoredFile] = []
+        for output_page in output_pages:
+            final_page = (
+                output_page.parent.parent / "svg_final" / output_page.name
+            )
+            preview_path = output_page
+            if (
+                final_page.is_file()
+                and final_page.stat().st_mtime_ns >= output_page.stat().st_mtime_ns
+            ):
+                preview_path = final_page
+            preview = self.describe_existing(job_id, preview_path)
+            logical_path = output_page.relative_to(self.job_dir(job_id)).as_posix()
+            preview.id = uuid5(job_id, logical_path)
+            previews.append(preview)
         return previews
 
     def prepare_revision_scope(

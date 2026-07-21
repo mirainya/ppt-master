@@ -162,6 +162,7 @@ async def _require_job(
 def _select_artifacts(
     artifacts: list[dict],
     live_paths: set[str],
+    live_names: set[str],
 ) -> list[dict]:
     normalized: list[dict] = []
     for artifact in artifacts:
@@ -180,7 +181,9 @@ def _select_artifacts(
     records = [
         artifact
         for artifact in normalized
-        if artifact["kind"] == "preview" and artifact["storage_path"] not in live_paths
+        if artifact["kind"] == "preview"
+        and artifact["storage_path"] not in live_paths
+        and artifact["filename"] not in live_names
     ]
     deliverables: dict[tuple[str, str], dict] = {}
     for artifact in normalized:
@@ -623,7 +626,8 @@ async def list_artifacts(
     existing = await repository.list_artifacts(job_id)
     live_previews = request.app.state.storage.discover_live_previews(job_id)
     live_paths = {preview.relative_path for preview in live_previews}
-    records = _select_artifacts(existing, live_paths)
+    live_names = {preview.filename for preview in live_previews}
+    records = _select_artifacts(existing, live_paths, live_names)
     for preview in live_previews:
         path = request.app.state.storage.resolve_job_file(job_id, preview.relative_path)
         records.append(

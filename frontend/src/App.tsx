@@ -391,7 +391,11 @@ export default function App() {
       .then((entries) => {
         if (!active) return;
         setPreviewUrls(Object.fromEntries(entries));
-        setSelectedPreviewId((current) => current || entries[0]?.[0] || null);
+        setSelectedPreviewId((current) =>
+          current && entries.some(([id]) => id === current)
+            ? current
+            : entries[0]?.[0] || null,
+        );
       })
       .catch((reason: unknown) => {
         if (active)
@@ -401,7 +405,11 @@ export default function App() {
       active = false;
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
-  }, [client, selectedId, previewArtifacts.map((item) => item.id).join(",")]);
+  }, [
+    client,
+    selectedId,
+    previewArtifacts.map((item) => `${item.id}:${item.sha256}`).join(","),
+  ]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
