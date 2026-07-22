@@ -43,6 +43,113 @@ class AuthRepository:
         )
         return dict(record) if record else None
 
+    async def list_local_users(self) -> list[dict[str, Any]]:
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT account.id,
+                   account.username,
+                   account.is_admin,
+                   account.disabled,
+                   account.created_at,
+                   account.updated_at,
+                   COUNT(api_key.id) FILTER (
+                       WHERE api_key.revoked_at IS NULL
+                   )::INTEGER AS active_api_key_count
+            FROM users AS account
+            LEFT JOIN user_api_keys AS api_key ON api_key.user_id = account.id
+            WHERE account.org_id IS NULL
+            GROUP BY account.id
+            ORDER BY account.created_at ASC
+            """
+        )
+        return [dict(record) for record in records]
+
+    async def get_local_user(self, user_id: UUID) -> dict[str, Any] | None:
+        record = await self.database.require_pool().fetchrow(
+            """
+            SELECT id, username, is_admin, disabled, created_at, updated_at
+            FROM users
+            WHERE id = $1 AND org_id IS NULL
+            """,
+            user_id,
+        )
+        return dict(record) if record else None
+
+    async def set_local_user_disabled(
+        self,
+        user_id: UUID,
+        disabled: bool,
+        *,
+        acting_user_id: UUID,
+    ) -> dict[str, Any] | None:
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    SELECT id, username, is_admin, disabled, created_at, updated_at
+                    FROM users
+                    WHERE id = $1 AND org_id IS NULL
+                    FOR UPDATE
+                    """,
+                    user_id,
+                )
+                if record is None:
+                    return None
+                if disabled and record["id"] == acting_user_id:
+                    raise ValueError("cannot disable the current administrator")
+                if disabled and record["is_admin"]:
+                    active_admins = await connection.fetchval(
+                        """
+                        SELECT COUNT(*)
+                        FROM users
+                        WHERE org_id IS NULL
+                          AND is_admin = TRUE
+                          AND disabled = FALSE
+                        """
+                    )
+                    if active_admins <= 1:
+                        raise ValueError("cannot disable the last active administrator")
+                updated = await connection.fetchrow(
+                    """
+                    UPDATE users
+                    SET disabled = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    RETURNING id, username, is_admin, disabled, created_at, updated_at
+                    """,
+                    user_id,
+                    disabled,
+                )
+                if disabled:
+                    await connection.execute(
+                        "DELETE FROM user_sessions WHERE user_id = $1",
+                        user_id,
+                    )
+                return dict(updated)
+
+    async def reset_local_user_password(
+        self,
+        user_id: UUID,
+        password_hash: str,
+    ) -> bool:
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                result = await connection.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = $2, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND org_id IS NULL
+                    """,
+                    user_id,
+                    password_hash,
+                )
+                if result != "UPDATE 1":
+                    return False
+                await connection.execute(
+                    "DELETE FROM user_sessions WHERE user_id = $1",
+                    user_id,
+                )
+                return True
+
     async def update_password_hash(self, user_id: UUID, password_hash: str) -> None:
         await self.database.require_pool().execute(
             """
@@ -296,6 +403,32 @@ class AuthRepository:
             org_id,
         )
         return dict(record) if record else None
+
+    async def list_organizations(self) -> list[dict[str, Any]]:
+        """List every organization, newest first, for the admin billing console."""
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT id, name, slug, credit_balance, daily_job_limit,
+                   max_active_jobs, created_at
+            FROM organizations
+            ORDER BY created_at DESC
+            """
+        )
+        return [
+            {
+                "id": record["id"],
+                "name": record["name"],
+                "slug": record["slug"],
+                # credit_balance is NUMERIC(14,4) -> Decimal; coerce to float so
+                # the JSON payload matches the frontend Organization type and the
+                # other billing endpoints (pricing / usage / topup all use float).
+                "credit_balance": float(record["credit_balance"]),
+                "daily_job_limit": record["daily_job_limit"],
+                "max_active_jobs": record["max_active_jobs"],
+                "created_at": record["created_at"],
+            }
+            for record in records
+        ]
 
     async def provision_end_user(
         self,

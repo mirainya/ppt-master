@@ -50,6 +50,10 @@ from service.repository import (
     OrganizationUnavailableError,
 )
 from service.schemas import (
+    AdminUserCreate,
+    AdminUserPasswordUpdate,
+    AdminUserRead,
+    AdminUserStatusUpdate,
     ApiKeyCreate,
     ApiKeyCreated,
     ApiKeyRead,
@@ -70,10 +74,13 @@ from service.schemas import (
     OrgTicketConsume,
     OrgTicketCreated,
     PricingUpdate,
+    RuntimeConfigRead,
+    RuntimeConfigUpdate,
     TERMINAL_STATUSES,
     UserRead,
 )
 from service.storage import JobStorage
+from service.runtime_config import RuntimeConfig, RuntimeConfigRepository
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -96,6 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_repository = AuthRepository(database)
     app.state.repository = JobRepository(database)
     app.state.billing_repository = BillingRepository(database)
+    app.state.runtime_config_repository = RuntimeConfigRepository(database, settings)
     app.state.ticket_store = ticket_store
     app.state.queue = queue
     app.state.storage = storage
@@ -1015,6 +1023,145 @@ async def org_usage(
     return {"org_id": user.org_id, "end_users": rows}
 
 
+@app.get("/v1/admin/users", response_model=list[AdminUserRead])
+async def admin_list_users(request: Request, admin: AdminUser) -> list[dict]:
+    """List local password accounts and their active API key counts."""
+    return await request.app.state.auth_repository.list_local_users()
+
+
+@app.post(
+    "/v1/admin/users",
+    response_model=AdminUserRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user(
+    request: Request,
+    submission: AdminUserCreate,
+    admin: AdminUser,
+) -> dict:
+    """Create one local password account."""
+    username = normalize_username(submission.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="username cannot be blank")
+    try:
+        account = await request.app.state.auth_repository.create_user(
+            username,
+            hash_password(submission.password),
+            is_admin=submission.is_admin,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UniqueViolationError as exc:
+        raise HTTPException(status_code=409, detail="username already exists") from exc
+    return {**account, "active_api_key_count": 0}
+
+
+@app.patch("/v1/admin/users/{user_id}", response_model=AdminUserRead)
+async def admin_update_user_status(
+    request: Request,
+    user_id: UUID,
+    submission: AdminUserStatusUpdate,
+    admin: AdminUser,
+) -> dict:
+    """Enable or disable one local account."""
+    try:
+        account = await request.app.state.auth_repository.set_local_user_disabled(
+            user_id,
+            submission.disabled,
+            acting_user_id=admin.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if account is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    keys = await request.app.state.auth_repository.list_api_keys(user_id)
+    return {
+        **account,
+        "active_api_key_count": sum(key["revoked_at"] is None for key in keys),
+    }
+
+
+@app.put("/v1/admin/users/{user_id}/password", response_model=MessageRead)
+async def admin_reset_user_password(
+    request: Request,
+    user_id: UUID,
+    submission: AdminUserPasswordUpdate,
+    admin: AdminUser,
+) -> MessageRead:
+    """Replace a local account password and revoke its browser sessions."""
+    try:
+        password_hash = hash_password(submission.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    updated = await request.app.state.auth_repository.reset_local_user_password(
+        user_id,
+        password_hash,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="user not found")
+    return MessageRead(message="password reset")
+
+
+@app.get(
+    "/v1/admin/users/{user_id}/api-keys",
+    response_model=list[ApiKeyRead],
+)
+async def admin_list_user_api_keys(
+    request: Request,
+    user_id: UUID,
+    admin: AdminUser,
+) -> list[dict]:
+    if await request.app.state.auth_repository.get_local_user(user_id) is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    return await request.app.state.auth_repository.list_api_keys(user_id)
+
+
+@app.post(
+    "/v1/admin/users/{user_id}/api-keys",
+    response_model=ApiKeyCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user_api_key(
+    request: Request,
+    user_id: UUID,
+    submission: ApiKeyCreate,
+    admin: AdminUser,
+) -> dict:
+    """Issue a user-owned API key and return its plaintext exactly once."""
+    if await request.app.state.auth_repository.get_local_user(user_id) is None:
+        raise HTTPException(status_code=404, detail="user not found")
+    key, prefix = generate_api_key()
+    record = await request.app.state.auth_repository.create_api_key(
+        user_id,
+        submission.name,
+        prefix,
+        hash_token(key),
+    )
+    return {**record, "key": key}
+
+
+@app.delete(
+    "/v1/admin/users/{user_id}/api-keys/{key_id}",
+    response_model=MessageRead,
+)
+async def admin_revoke_user_api_key(
+    request: Request,
+    user_id: UUID,
+    key_id: UUID,
+    admin: AdminUser,
+) -> MessageRead:
+    revoked = await request.app.state.auth_repository.revoke_api_key(user_id, key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="user API key not found")
+    return MessageRead(message="user API key revoked")
+
+
+@app.get("/v1/admin/orgs")
+async def admin_list_orgs(request: Request, admin: AdminUser) -> list[dict]:
+    """List organizations for the admin billing console."""
+    return await request.app.state.auth_repository.list_organizations()
+
+
 @app.post("/v1/admin/orgs", status_code=status.HTTP_201_CREATED)
 async def admin_create_org(
     request: Request, submission: OrgCreate, admin: AdminUser
@@ -1122,3 +1269,59 @@ async def admin_update_pricing(
         "price_image": updated.price_image,
         "hold_amount": updated.hold_amount,
     }
+
+
+def _runtime_config_read(config: RuntimeConfig) -> dict:
+    return {
+        "codex_base_url": config.codex_base_url,
+        "codex_api_key_configured": bool(config.codex_api_key),
+        "codex_model": config.codex_model,
+        "image_base_url": config.image_base_url,
+        "image_api_key_configured": bool(config.image_api_key),
+        "image_model": config.image_model,
+        "image_size": config.image_size,
+        "image_concurrency": config.image_concurrency,
+        "updated_at": config.updated_at,
+    }
+
+
+@app.get("/v1/admin/runtime-config", response_model=RuntimeConfigRead)
+async def admin_get_runtime_config(
+    request: Request, admin: AdminUser
+) -> dict:
+    config = await request.app.state.runtime_config_repository.get()
+    return _runtime_config_read(config)
+
+
+@app.put("/v1/admin/runtime-config", response_model=RuntimeConfigRead)
+async def admin_update_runtime_config(
+    request: Request,
+    submission: RuntimeConfigUpdate,
+    admin: AdminUser,
+) -> dict:
+    try:
+        config = await request.app.state.runtime_config_repository.update(
+            codex_base_url=submission.codex_base_url,
+            codex_api_key=(
+                submission.codex_api_key.strip() or None
+                if submission.codex_api_key is not None
+                else None
+            ),
+            clear_codex_api_key=submission.clear_codex_api_key,
+            codex_model=submission.codex_model,
+            image_base_url=submission.image_base_url,
+            image_api_key=(
+                submission.image_api_key.strip() or None
+                if submission.image_api_key is not None
+                else None
+            ),
+            clear_image_api_key=submission.clear_image_api_key,
+            image_model=submission.image_model,
+            image_size=submission.image_size,
+            image_concurrency=submission.image_concurrency,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _runtime_config_read(config)
