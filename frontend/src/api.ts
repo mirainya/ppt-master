@@ -50,6 +50,13 @@ export class ApiClient {
     });
   }
 
+  consumeOrgTicket(ticket: string): Promise<User> {
+    return this.request<User>("/v1/auth/org-tickets/consume", {
+      method: "POST",
+      body: JSON.stringify({ ticket }),
+    });
+  }
+
   logout(): Promise<unknown> {
     return this.request("/v1/auth/logout", { method: "POST" });
   }

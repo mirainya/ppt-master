@@ -55,6 +55,23 @@ import type {
 import { terminalStatuses } from "./types";
 
 const THEME_STORAGE = "ppt-master-theme";
+const initialOrgTicket = (() => {
+  const url = new URL(window.location.href);
+  const fragment = new URLSearchParams(url.hash.slice(1));
+  const ticket =
+    fragment.get("sso_ticket") || url.searchParams.get("sso_ticket");
+  if (ticket) {
+    fragment.delete("sso_ticket");
+    url.searchParams.delete("sso_ticket");
+    url.hash = fragment.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  }
+  return ticket;
+})();
 
 type AppTheme = "mint" | "sakura" | "sky" | "dark";
 
@@ -180,6 +197,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previewPaneRef = useRef<HTMLElement>(null);
+  const authRequestRef = useRef<Promise<User> | null>(null);
   const [previewFullscreen, setPreviewFullscreen] = useState(false);
 
   const apiClient = useMemo(() => new ApiClient(), []);
@@ -236,15 +254,26 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    apiClient
-      .me()
+    if (!authRequestRef.current) {
+      authRequestRef.current = initialOrgTicket
+        ? apiClient.consumeOrgTicket(initialOrgTicket)
+        : apiClient.me();
+    }
+    authRequestRef.current
       .then((user) => {
         if (active) setCurrentUser(user);
       })
       .catch((reason: unknown) => {
-        if (!active || (reason instanceof ApiError && reason.status === 401))
+        if (!active) return;
+        if (
+          !initialOrgTicket &&
+          reason instanceof ApiError &&
+          reason.status === 401
+        )
           return;
-        setAuthError("认证服务不可用");
+        setAuthError(
+          initialOrgTicket ? "工作台登录链接无效或已过期" : "认证服务不可用",
+        );
       })
       .finally(() => {
         if (active) setAuthChecking(false);
@@ -745,14 +774,16 @@ export default function App() {
           <div className="account-row">
             <UserRound size={16} />
             <span>{currentUser?.username || "账户"}</span>
-            <button
-              type="button"
-              onClick={openApiKeyDialog}
-              aria-label="管理 API 密钥"
-              title="管理 API 密钥"
-            >
-              <KeyRound size={15} />
-            </button>
+            {!currentUser?.org_id && (
+              <button
+                type="button"
+                onClick={openApiKeyDialog}
+                aria-label="管理 API 密钥"
+                title="管理 API 密钥"
+              >
+                <KeyRound size={15} />
+              </button>
+            )}
             <button
               type="button"
               onClick={logout}
@@ -1218,7 +1249,7 @@ export default function App() {
         </div>
       </section>
 
-      {apiKeyDialogOpen && currentUser && (
+      {apiKeyDialogOpen && currentUser && !currentUser.org_id && (
         <div className="auth-overlay">
           <section className="auth-dialog api-key-dialog" aria-modal="true">
             <div className="dialog-heading">

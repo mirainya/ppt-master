@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from service.auth import (
@@ -39,6 +39,7 @@ from service.auth import (
     verify_password,
 )
 from service.auth_repository import AuthRepository
+from service.auth_ticket import OrgTicketStore
 from service.billing import BillingRepository, Pricing
 from service.config import Settings
 from service.database import Database
@@ -66,6 +67,8 @@ from service.schemas import (
     MessageRead,
     OrgCreate,
     OrgKeyCreate,
+    OrgTicketConsume,
+    OrgTicketCreated,
     PricingUpdate,
     TERMINAL_STATUSES,
     UserRead,
@@ -83,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings.validate()
     database = Database(settings.database_url)
     queue = JobQueue(settings.redis_url, settings.queue_name)
+    ticket_store = OrgTicketStore(settings.redis_url)
     storage = JobStorage(settings.runtime_root, settings.max_upload_bytes)
     await database.connect()
     await database.verify_schema()
@@ -92,11 +96,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_repository = AuthRepository(database)
     app.state.repository = JobRepository(database)
     app.state.billing_repository = BillingRepository(database)
+    app.state.ticket_store = ticket_store
     app.state.queue = queue
     app.state.storage = storage
     try:
         yield
     finally:
+        await ticket_store.close()
         await queue.close()
         await database.close()
 
@@ -168,6 +174,22 @@ async def require_user(
     return user
 
 
+async def require_org_api_user(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> AuthenticatedUser:
+    """Authenticate only an organization API key for server-to-server SSO issuance."""
+    if credentials is None or not is_org_api_key(credentials.credentials):
+        raise _authentication_error()
+    repository: AuthRepository = request.app.state.auth_repository
+    org_id = await repository.authenticate_org_api_key(
+        hash_token(credentials.credentials)
+    )
+    if org_id is None:
+        raise _authentication_error()
+    return await repository.provision_end_user(org_id, _resolve_end_user_id(request))
+
+
 async def require_browser_user(request: Request) -> AuthenticatedUser:
     session_token = request.cookies.get(SESSION_COOKIE, "")
     if not session_token:
@@ -179,6 +201,16 @@ async def require_browser_user(request: Request) -> AuthenticatedUser:
     return user
 
 
+async def require_personal_browser_user(request: Request) -> AuthenticatedUser:
+    user = await require_browser_user(request)
+    if user.org_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="organization users cannot manage personal API keys",
+        )
+    return user
+
+
 async def require_admin_user(request: Request) -> AuthenticatedUser:
     user = await require_browser_user(request)
     if not user.is_admin:
@@ -187,12 +219,39 @@ async def require_admin_user(request: Request) -> AuthenticatedUser:
 
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(require_user)]
+OrgApiUser = Annotated[AuthenticatedUser, Depends(require_org_api_user)]
 BrowserUser = Annotated[AuthenticatedUser, Depends(require_browser_user)]
+PersonalBrowserUser = Annotated[
+    AuthenticatedUser, Depends(require_personal_browser_user)
+]
 AdminUser = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
 
 def _repository(request: Request) -> JobRepository:
     return request.app.state.repository
+
+
+async def _start_browser_session(
+    request: Request,
+    response: Response,
+    user_id: UUID,
+) -> None:
+    """Create the standard workbench session and attach its HttpOnly cookie."""
+    session_token = generate_session_token()
+    await request.app.state.auth_repository.create_session(
+        user_id,
+        hash_token(session_token),
+        request.app.state.settings.session_days,
+    )
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_token,
+        max_age=request.app.state.settings.session_days * 86_400,
+        httponly=True,
+        secure=request.app.state.settings.session_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
 
 
 async def _require_job(
@@ -293,6 +352,12 @@ def _asset_read(storage: JobStorage, asset: dict) -> dict:
     }
 
 
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Open the interactive API documentation from the service root."""
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health")
 async def health(request: Request) -> dict[str, str]:
     await request.app.state.database.healthcheck()
@@ -303,6 +368,47 @@ async def health(request: Request) -> dict[str, str]:
         if await request.app.state.queue.worker_available()
         else "unavailable",
     }
+
+
+@app.post(
+    "/v1/auth/org-tickets",
+    response_model=OrgTicketCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_org_ticket(
+    request: Request,
+    user: OrgApiUser,
+) -> dict[str, object]:
+    """Issue a short-lived workbench login ticket to an organization backend."""
+    if user.org_id is None:
+        raise HTTPException(status_code=403, detail="organization credentials required")
+    ticket, expires_in = await request.app.state.ticket_store.issue(
+        user.id,
+        user.org_id,
+    )
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
+@app.post("/v1/auth/org-tickets/consume", response_model=UserRead)
+async def consume_org_ticket(
+    request: Request,
+    response: Response,
+    submission: OrgTicketConsume,
+) -> AuthenticatedUser:
+    """Consume a one-time ticket and create the existing workbench session."""
+    identity = await request.app.state.ticket_store.consume(submission.ticket)
+    if identity is None:
+        raise HTTPException(
+            status_code=401, detail="login ticket is invalid or expired"
+        )
+    user_id, org_id = identity
+    user = await request.app.state.auth_repository.get_active_org_user(user_id, org_id)
+    if user is None:
+        raise HTTPException(
+            status_code=401, detail="login ticket is invalid or expired"
+        )
+    await _start_browser_session(request, response, user.id)
+    return user
 
 
 @app.post("/v1/auth/login", response_model=UserRead)
@@ -325,25 +431,12 @@ async def login(
             account["id"],
             hash_password(submission.password),
         )
-    session_token = generate_session_token()
-    await repository.create_session(
-        account["id"],
-        hash_token(session_token),
-        request.app.state.settings.session_days,
-    )
-    response.set_cookie(
-        SESSION_COOKIE,
-        session_token,
-        max_age=request.app.state.settings.session_days * 86_400,
-        httponly=True,
-        secure=request.app.state.settings.session_cookie_secure,
-        samesite="lax",
-        path="/",
-    )
+    await _start_browser_session(request, response, account["id"])
     return {
         "id": account["id"],
         "username": account["username"],
         "is_admin": account["is_admin"],
+        "org_id": account["org_id"],
     }
 
 
@@ -364,7 +457,7 @@ async def me(user: CurrentUser) -> AuthenticatedUser:
 
 
 @app.get("/v1/auth/api-keys", response_model=list[ApiKeyRead])
-async def list_api_keys(request: Request, user: BrowserUser) -> list[dict]:
+async def list_api_keys(request: Request, user: PersonalBrowserUser) -> list[dict]:
     return await request.app.state.auth_repository.list_api_keys(user.id)
 
 
@@ -376,7 +469,7 @@ async def list_api_keys(request: Request, user: BrowserUser) -> list[dict]:
 async def create_api_key(
     request: Request,
     submission: ApiKeyCreate,
-    user: BrowserUser,
+    user: PersonalBrowserUser,
 ) -> dict:
     name = submission.name.strip()
     if not name:
@@ -398,7 +491,7 @@ async def create_api_key(
 async def revoke_api_key(
     request: Request,
     key_id: UUID,
-    user: BrowserUser,
+    user: PersonalBrowserUser,
 ) -> MessageRead:
     revoked = await request.app.state.auth_repository.revoke_api_key(user.id, key_id)
     if not revoked:

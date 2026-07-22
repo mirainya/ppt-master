@@ -157,6 +157,20 @@ class UserRead(BaseModel):
     id: UUID
     username: str
     is_admin: bool
+    org_id: UUID | None = None
+
+
+class OrgTicketCreated(BaseModel):
+    """One-time workbench login ticket issued to an organization backend."""
+
+    ticket: str
+    expires_in: int
+
+
+class OrgTicketConsume(BaseModel):
+    """One-time organization login ticket submitted by the workbench."""
+
+    ticket: str = Field(min_length=32, max_length=200)
 
 
 class ApiKeyCreate(BaseModel):

@@ -81,6 +81,7 @@ export interface User {
   id: string;
   username: string;
   is_admin: boolean;
+  org_id: string | null;
 }
 
 export interface ApiKey {

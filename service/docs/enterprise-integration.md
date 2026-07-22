@@ -36,7 +36,38 @@ curl -X POST https://<host>/v1/admin/orgs/<org_id>/credits \
 
 同一 `X-End-User-Id` 会稳定映射到一条隔离的用户空间：不同终端用户互相看不到对方的任务，用量分别计量。不带该头时，任务归属组织的默认服务账号。
 
-## 3. 生成 PPT
+## 3. 借用工作台（一次性 SSO 票据）
+
+第三方终端用户可以直接进入 PPT Master 工作台，无需再次输入用户名和密码。组织 API Key
+始终保存在第三方后端，不发送到浏览器。
+
+第三方后端先为当前终端用户申请一次性票据：
+
+```bash
+curl -X POST https://<host>/v1/auth/org-tickets \
+  -H 'Authorization: Bearer pptm_org_xxxxx' \
+  -H 'X-End-User-Id: cust-42'
+```
+
+返回：
+
+```json
+{"ticket":"<one-time-ticket>","expires_in":60}
+```
+
+第三方前端随后跳转到：
+
+```text
+https://<host>/#sso_ticket=<one-time-ticket>
+```
+
+票据放在 URL Fragment 中，不会随首页请求进入服务器访问日志。工作台会调用
+`POST /v1/auth/org-tickets/consume` 原子消费票据，并设置现有 HttpOnly Session Cookie。
+票据有效期为 60 秒且只能使用一次；登录身份继续绑定原
+`org_id + X-End-User-Id`，任务隔离、预扣和用量统计均保持不变。组织被停用后，已有
+工作台 Session 也会立即失效。
+
+## 4. 生成 PPT
 
 ```bash
 curl -X POST https://<host>/v1/jobs \
@@ -78,7 +109,7 @@ curl -OJ https://<host>/v1/jobs/<job_id>/artifacts/<artifact_id>/download \
   -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42'
 ```
 
-## 4. 计量与计费
+## 5. 计量与计费
 
 本服务按 **token + 生图** 的真实成本扣组织预付余额（第 1 层）。企业按下面的用量凭证，用自己的定价向终端用户计费（第 2 层，本服务不参与）。
 
@@ -112,12 +143,12 @@ curl 'https://<host>/v1/orgs/usage?end_user_id=cust-42&since=2026-07-01T00:00:00
 
 返回该组织每个终端用户的用量与成本汇总，用于周期性出账。
 
-## 5. 数据隔离说明
+## 6. 数据隔离说明
 
 - 逻辑隔离：企业之间、企业内终端用户之间的任务与产物互相不可见（基于所有者鉴权）。
 - 物理存储未按组织分目录（同一运行目录混放），仅靠接口鉴权隔离。对物理隔离有合规要求的场景需另行约定。
 
-## 6. Python 示例
+## 7. Python 示例
 
 ```python
 import httpx

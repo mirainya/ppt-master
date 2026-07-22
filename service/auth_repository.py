@@ -83,11 +83,16 @@ class AuthRepository:
             UPDATE user_sessions AS session
             SET last_seen_at = CURRENT_TIMESTAMP
             FROM users AS account
+            LEFT JOIN organizations AS org ON org.id = account.org_id
             WHERE session.token_hash = $1
               AND session.expires_at > CURRENT_TIMESTAMP
               AND account.id = session.user_id
               AND account.disabled = FALSE
-            RETURNING account.id, account.username, account.is_admin
+              AND (account.org_id IS NULL OR org.status = 'active')
+            RETURNING account.id,
+                      COALESCE(account.external_id, account.username) AS username,
+                      account.is_admin,
+                      account.org_id
             """,
             token_hash,
         )
@@ -105,11 +110,16 @@ class AuthRepository:
             UPDATE user_api_keys AS api_key
             SET last_used_at = CURRENT_TIMESTAMP
             FROM users AS account
+            LEFT JOIN organizations AS org ON org.id = account.org_id
             WHERE api_key.token_hash = $1
               AND api_key.revoked_at IS NULL
               AND account.id = api_key.user_id
               AND account.disabled = FALSE
-            RETURNING account.id, account.username, account.is_admin
+              AND (account.org_id IS NULL OR org.status = 'active')
+            RETURNING account.id,
+                      COALESCE(account.external_id, account.username) AS username,
+                      account.is_admin,
+                      account.org_id
             """,
             token_hash,
         )
@@ -326,3 +336,27 @@ class AuthRepository:
             is_admin=record["is_admin"],
             org_id=record["org_id"],
         )
+
+    async def get_active_org_user(
+        self,
+        user_id: UUID,
+        org_id: UUID,
+    ) -> AuthenticatedUser | None:
+        """Resolve a provisioned user only while both account and organization are active."""
+        record = await self.database.require_pool().fetchrow(
+            """
+            SELECT account.id,
+                   account.external_id AS username,
+                   account.is_admin,
+                   account.org_id
+            FROM users AS account
+            JOIN organizations AS org ON org.id = account.org_id
+            WHERE account.id = $1
+              AND account.org_id = $2
+              AND account.disabled = FALSE
+              AND org.status = 'active'
+            """,
+            user_id,
+            org_id,
+        )
+        return self._authenticated_user(record)
