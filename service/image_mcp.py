@@ -124,6 +124,42 @@ def _load_image_gen() -> Any:
     return import_module("image_gen")
 
 
+def _read_image_audit() -> dict[str, Any]:
+    """Read the current image-generation audit record."""
+    path = _job_dir() / "control" / "image_generation.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def _read_cumulative_total(payload: dict[str, Any], manifest_path: str) -> int:
+    """Read and reconcile the running total after an interrupted generation call."""
+    audit = _read_image_audit()
+    try:
+        total = max(0, int(audit.get("cumulative_total", 0)))
+    except (ValueError, TypeError):
+        total = 0
+    audited_manifest = str(audit.get("manifest_path", "")).replace("\\", "/")
+    if audit.get("state") != "running" or audited_manifest != manifest_path:
+        return total
+    raw_pending_files = audit.get("pending_files", [])
+    pending_files = (
+        {str(filename) for filename in raw_pending_files if filename}
+        if isinstance(raw_pending_files, list)
+        else set()
+    )
+    generated_files = {
+        str(item.get("filename", ""))
+        for item in payload["items"]
+        if item.get("status") == "Generated"
+    }
+    return total + len(pending_files & generated_files)
+
+
 def _write_audit(state: str, **details: Any) -> None:
     control_dir = _job_dir() / "control"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -152,11 +188,30 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
 
     manifest = _manifest_path(manifest_path)
     payload = _validate_manifest(manifest, model)
+    relative_manifest = manifest.relative_to(_job_dir()).as_posix()
+    prior_total = _read_cumulative_total(payload, relative_manifest)
+    initial_statuses = [str(item["status"]) for item in payload["items"]]
+    pending_files = [
+        str(item["filename"])
+        for item in payload["items"]
+        if item["status"] in {"Pending", "Failed"}
+    ]
+
+    def generated_this_call() -> int:
+        return sum(
+            initial_status in {"Pending", "Failed"}
+            and str(item.get("status", "")) == "Generated"
+            for initial_status, item in zip(initial_statuses, payload["items"])
+        )
+
     audit_details = {
-        "manifest_path": str(manifest.relative_to(_job_dir())),
+        "manifest_path": relative_manifest,
         "model": model,
         "item_count": len(payload["items"]),
+        "pending_files": pending_files,
         "requested_image_size": image_size,
+        # Preserve the running total across running/failed writes (see _write_audit).
+        "cumulative_total": prior_total,
     }
     _write_audit("running", **audit_details)
     os.environ.update(
@@ -186,11 +241,13 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
             )
             image_gen.render_manifest_md_to_file(str(manifest), payload)
         if failed:
-            raise RuntimeError(
-                f"Image generation failed for {failed} manifest item(s)"
-            )
+            raise RuntimeError(f"Image generation failed for {failed} manifest item(s)")
     except Exception as exc:
-        _write_audit("failed", error=str(exc)[:500], **audit_details)
+        failed_details = {
+            **audit_details,
+            "cumulative_total": prior_total + generated_this_call(),
+        }
+        _write_audit("failed", error=str(exc)[:500], **failed_details)
         raise
 
     generated_files = []
@@ -209,11 +266,16 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         "message": f"Generated {len(generated_files)} image(s) with {model}",
         "requested_image_size": image_size,
     }
+    succeeded_details = {
+        **audit_details,
+        # Monotonic running total of actually generated images, for metering.
+        "cumulative_total": prior_total + generated_this_call(),
+    }
     _write_audit(
         "succeeded",
         generated_files=generated_files,
         generated_dimensions=generated_dimensions,
-        **audit_details,
+        **succeeded_details,
     )
     return result
 

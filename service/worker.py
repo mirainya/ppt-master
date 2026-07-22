@@ -10,6 +10,7 @@ from time import time
 from uuid import UUID, uuid4
 
 from service.agent_runner import AgentRunCancelled, AgentRunner, RunnerResult
+from service.billing import BillingRepository
 from service.config import Settings
 from service.database import Database
 from service.queue import JobClaim, JobQueue
@@ -148,9 +149,134 @@ async def _record_artifacts(
         await repository.add_artifact(job_id, kind, stored_file)
 
 
+def _pending_turn_usage_path(storage: JobStorage, job_id: UUID) -> Path:
+    return storage.prepare_job(job_id) / "control" / "pending_turn_usage.json"
+
+
+def _read_pending_turn_usage(path: Path) -> tuple[str, int, int]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        turn_id = str(payload["turn_id"]).strip()
+        input_tokens = max(0, int(payload["input_tokens"]))
+        output_tokens = max(0, int(payload["output_tokens"]))
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("pending turn usage is invalid") from exc
+    if not turn_id:
+        raise RuntimeError("pending turn usage has no turn_id")
+    return turn_id, input_tokens, output_tokens
+
+
+async def _settle_turn_usage(
+    job: dict,
+    repository: JobRepository,
+    billing: BillingRepository,
+    storage: JobStorage,
+    *,
+    turn_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    cumulative_pages: int | None = None,
+) -> None:
+    """Settle one organization turn from durable usage values."""
+    org_id = job.get("org_id")
+    if org_id is None:
+        return
+    progress = storage.inspect_workspace(job["id"])
+    try:
+        pricing = await billing.get_pricing()
+        await repository.record_turn_usage(
+            job["id"],
+            org_id,
+            job["owner_id"],
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cumulative_images=progress.image_generation_total,
+            cumulative_pages=(
+                progress.page_count if cumulative_pages is None else cumulative_pages
+            ),
+            price_input_token=pricing.price_input_token,
+            price_output_token=pricing.price_output_token,
+            price_image=pricing.price_image,
+        )
+    except Exception:
+        logger.exception("Could not record turn usage for %s", job["id"])
+        raise
+
+
+async def _meter_pending_turn(
+    job: dict,
+    repository: JobRepository,
+    billing: BillingRepository,
+    storage: JobStorage,
+) -> None:
+    """Settle a turn saved before a worker interruption, then remove the sidecar."""
+    path = _pending_turn_usage_path(storage, job["id"])
+    if not path.is_file():
+        return
+    if job.get("org_id") is None:
+        path.unlink(missing_ok=True)
+        return
+    turn_id, input_tokens, output_tokens = _read_pending_turn_usage(path)
+    revision_scope = storage.load_revision_scope(job["id"])
+    await _settle_turn_usage(
+        job,
+        repository,
+        billing,
+        storage,
+        turn_id=turn_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cumulative_pages=(
+            len(revision_scope.page_order) if revision_scope is not None else None
+        ),
+    )
+    path.unlink(missing_ok=True)
+
+
+async def _meter_turn(
+    job: dict,
+    result: RunnerResult,
+    repository: JobRepository,
+    billing: BillingRepository,
+    storage: JobStorage,
+    *,
+    cumulative_pages: int | None = None,
+) -> None:
+    """Settle a completed turn and clear its durable pending-usage sidecar."""
+    path = _pending_turn_usage_path(storage, job["id"])
+    if job.get("org_id") is None:
+        path.unlink(missing_ok=True)
+        return
+    turn_id = result.turn_id
+    input_tokens = result.input_tokens
+    output_tokens = result.output_tokens
+    if input_tokens is None or output_tokens is None:
+        pending_turn_id, input_tokens, output_tokens = _read_pending_turn_usage(path)
+        if turn_id and pending_turn_id != turn_id:
+            raise RuntimeError("pending turn usage does not match the completed turn")
+        turn_id = pending_turn_id
+    elif path.is_file():
+        pending_turn_id, _, _ = _read_pending_turn_usage(path)
+        if pending_turn_id != turn_id:
+            raise RuntimeError("pending turn usage does not match the completed turn")
+    await _settle_turn_usage(
+        job,
+        repository,
+        billing,
+        storage,
+        turn_id=turn_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cumulative_pages=cumulative_pages,
+    )
+    path.unlink(missing_ok=True)
+
+
 async def _process_job(
     job_id: UUID,
     repository: JobRepository,
+    billing: BillingRepository,
     storage: JobStorage,
     runner: AgentRunner,
     lease_lost: asyncio.Event,
@@ -158,12 +284,15 @@ async def _process_job(
     job = await repository.get_job(job_id)
     if job is None:
         return
+    await _meter_pending_turn(job, repository, billing, storage)
     if JobStatus(job["status"]) in TERMINAL_STATUSES:
+        await billing.release_hold(job_id)
         return
     if job["cancel_requested"]:
         await repository.set_status(
             job_id, JobStatus.CANCELLED, job["progress"], "Task cancelled"
         )
+        await billing.release_hold(job_id)
         return
 
     job_dir = storage.prepare_job(job_id)
@@ -269,6 +398,7 @@ async def _process_job(
                         "message": failure_message,
                     },
                 )
+                await billing.release_hold(job_id)
                 return
         available_source_paths = [
             path for path in source_paths if (job_dir / path).is_file()
@@ -291,6 +421,19 @@ async def _process_job(
             record_progress,
             revision_scope,
         )
+
+    # Meter every turn as soon as the result is in: the turn already consumed cost,
+    # so revision-scope violations, failures, and abandons must all be billed too.
+    await _meter_turn(
+        job,
+        result,
+        repository,
+        billing,
+        storage,
+        cumulative_pages=(
+            len(revision_scope.page_order) if revision_scope is not None else None
+        ),
+    )
 
     if revision_scope is not None:
         violations = storage.revision_scope_violations(job_id, revision_scope)
@@ -504,6 +647,7 @@ async def run_worker() -> None:
     await queue.healthcheck()
     await runner.open()
     repository = JobRepository(database)
+    billing = BillingRepository(database)
     worker_id = uuid4().hex
     stop_presence = asyncio.Event()
     presence_task = asyncio.create_task(
@@ -536,6 +680,7 @@ async def run_worker() -> None:
                 await _process_job(
                     claim.job_id,
                     repository,
+                    billing,
                     storage,
                     runner,
                     lease_lost,
@@ -547,16 +692,41 @@ async def run_worker() -> None:
                         "Stopped task %s after its lease was lost", claim.job_id
                     )
                 else:
+                    cancelled_job = await repository.get_job(claim.job_id)
+                    if cancelled_job is not None:
+                        await _meter_pending_turn(
+                            cancelled_job,
+                            repository,
+                            billing,
+                            storage,
+                        )
                     await repository.set_status(
                         claim.job_id,
                         JobStatus.CANCELLED,
                         0,
                         "Task cancelled",
                     )
+                    await billing.release_hold(claim.job_id)
                     acknowledge = True
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if lease_lost.is_set():
+                    logger.warning(
+                        "Task %s failed after its lease was lost; leaving recovery "
+                        "to the next worker: %s",
+                        claim.job_id,
+                        exc,
+                    )
+                    continue
+                failed_job = await repository.get_job(claim.job_id)
+                if failed_job is not None:
+                    await _meter_pending_turn(
+                        failed_job,
+                        repository,
+                        billing,
+                        storage,
+                    )
                 await repository.set_status(
                     claim.job_id,
                     JobStatus.FAILED,
@@ -564,6 +734,7 @@ async def run_worker() -> None:
                     "Task execution failed",
                     error={"code": "worker_error", "message": str(exc)},
                 )
+                await billing.release_hold(claim.job_id)
                 acknowledge = True
             finally:
                 stop_monitor.set()

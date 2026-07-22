@@ -180,3 +180,31 @@ class ApiKeyCreated(ApiKeyRead):
     """New API key response containing the one-time plaintext key."""
 
     key: str
+
+
+class OrgCreate(BaseModel):
+    """Admin request to onboard an enterprise organization."""
+
+    name: str = Field(min_length=1, max_length=200)
+    slug: str = Field(min_length=1, max_length=100, pattern=r"^[a-z0-9][a-z0-9-]*$")
+
+
+class OrgKeyCreate(BaseModel):
+    """Admin request to issue an organization API key."""
+
+    name: str = Field(min_length=1, max_length=100)
+
+
+class CreditTopup(BaseModel):
+    """Admin request to add prepaid credits to an organization."""
+
+    amount: float = Field(gt=0, allow_inf_nan=False)
+
+
+class PricingUpdate(BaseModel):
+    """Admin request to update layer-1 pricing and per-job hold."""
+
+    price_input_token: float = Field(ge=0, allow_inf_nan=False)
+    price_output_token: float = Field(ge=0, allow_inf_nan=False)
+    price_image: float = Field(ge=0, allow_inf_nan=False)
+    hold_amount: float = Field(ge=0, allow_inf_nan=False)

@@ -61,6 +61,9 @@ class RunnerResult:
     reference_case_ids: list[str]
     reference_files: list[str]
     session_id: str
+    turn_id: str = ""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class AgentRunCancelled(RuntimeError):
@@ -275,6 +278,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
         events = handle.stream()
         event_task: asyncio.Task[Any] | None = None
         completion: Any | None = None
+        turn_usage: dict[str, Any] = {}
         last_activity = ""
         last_agent_message = ""
         agent_message_buffers: dict[str, str] = {}
@@ -322,6 +326,20 @@ Keep the confirmed visual references in effect. Return their ids and paths again
                     if activity_message != last_activity:
                         last_activity = activity_message
                         await on_progress(activity_message, data)
+                if event.method == "thread/tokenUsage/updated":
+                    usage_payload = getattr(event, "payload", None)
+                    usage_turn_id = str(getattr(usage_payload, "turn_id", "") or "")
+                    usage = getattr(usage_payload, "token_usage", None)
+                    if usage_turn_id == handle.id and usage is not None:
+                        turn_usage[usage_turn_id] = usage
+                        input_tokens, output_tokens = self._usage_tokens(usage)
+                        self._write_pending_turn_usage(
+                            job_dir,
+                            usage_turn_id,
+                            input_tokens,
+                            output_tokens,
+                            completed=False,
+                        )
                 if event.method == "turn/completed":
                     completion = event.payload
                     break
@@ -337,6 +355,17 @@ Keep the confirmed visual references in effect. Return their ids and paths again
         if completion is None:
             raise RuntimeError("Agent runner ended without a completed turn")
         payload = self._result_payload(completion, last_agent_message)
+        turn_id, input_tokens, output_tokens = self._turn_metering(
+            completion, turn_usage.get(handle.id)
+        )
+        if input_tokens is not None and output_tokens is not None:
+            self._write_pending_turn_usage(
+                job_dir,
+                turn_id,
+                input_tokens,
+                output_tokens,
+                completed=True,
+            )
         return RunnerResult(
             phase=str(payload["phase"]),
             message=str(payload["message"]),
@@ -347,6 +376,9 @@ Keep the confirmed visual references in effect. Return their ids and paths again
             ],
             reference_files=[str(path) for path in payload["reference_files"]],
             session_id=thread.id,
+            turn_id=turn_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
     def _require_codex(self) -> AsyncCodex:
@@ -395,6 +427,59 @@ Remote image-generation security rule:
 - Then call the ppt_images generate_image_manifest MCP tool with that manifest path.
 - Use only the generated files returned by the tool and continue the PPT Master workflow.
 """.strip()
+
+    @staticmethod
+    def _turn_metering(
+        completion: Any, usage: Any | None = None
+    ) -> tuple[str, int | None, int | None]:
+        """Extract (turn_id, input_tokens, output_tokens) from a completed turn."""
+        turn = getattr(completion, "turn", None)
+        turn_id = str(getattr(turn, "id", "") or "")
+        usage = usage if usage is not None else getattr(turn, "usage", None)
+        if usage is None:
+            return turn_id, None, None
+        input_tokens, output_tokens = AgentRunner._usage_tokens(usage)
+        return turn_id, input_tokens, output_tokens
+
+    @staticmethod
+    def _usage_tokens(usage: Any) -> tuple[int, int]:
+        """Extract the current turn's token counts from an SDK usage payload."""
+        breakdown = getattr(usage, "last", usage)
+        input_tokens = int(getattr(breakdown, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(breakdown, "output_tokens", 0) or 0)
+        return input_tokens, output_tokens
+
+    @staticmethod
+    def _write_pending_turn_usage(
+        job_dir: Path,
+        turn_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        *,
+        completed: bool,
+    ) -> None:
+        """Persist the latest usage before database settlement can occur."""
+        if not turn_id:
+            return
+        control_dir = job_dir / "control"
+        control_dir.mkdir(parents=True, exist_ok=True)
+        path = control_dir / "pending_turn_usage.json"
+        temporary_path = path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "turn_id": turn_id,
+                    "input_tokens": max(0, input_tokens),
+                    "output_tokens": max(0, output_tokens),
+                    "completed": completed,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(path)
 
     @staticmethod
     def _result_payload(

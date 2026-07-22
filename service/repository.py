@@ -12,6 +12,14 @@ from service.schemas import JobRoute, JobStatus
 from service.storage import StoredFile
 
 
+class OrganizationUnavailableError(RuntimeError):
+    """Raised when an organization cannot create new jobs."""
+
+
+class OrganizationQuotaExceededError(RuntimeError):
+    """Raised when an organization has exhausted a job quota."""
+
+
 class JobRepository:
     """Apply task state changes through parameterized PostgreSQL queries."""
 
@@ -25,18 +33,55 @@ class JobRepository:
         prompt: str,
         route: JobRoute,
         title: str | None,
+        org_id: UUID | None = None,
     ) -> dict[str, Any]:
         async with self.database.require_pool().acquire() as connection:
             async with connection.transaction():
+                if org_id is not None:
+                    organization = await connection.fetchrow(
+                        """
+                        SELECT status, daily_job_limit, max_active_jobs
+                        FROM organizations
+                        WHERE id = $1
+                        FOR UPDATE
+                        """,
+                        org_id,
+                    )
+                    if organization is None or organization["status"] != "active":
+                        raise OrganizationUnavailableError("organization is not active")
+                    counts = await connection.fetchrow(
+                        """
+                        SELECT
+                            COUNT(*) FILTER (
+                                WHERE status NOT IN ('cancelled', 'failed', 'succeeded')
+                            ) AS active,
+                            COUNT(*) FILTER (
+                                WHERE created_at >= date_trunc('day', CURRENT_TIMESTAMP)
+                            ) AS today
+                        FROM jobs
+                        WHERE org_id = $1
+                        """,
+                        org_id,
+                    )
+                    if int(counts["active"]) >= int(organization["max_active_jobs"]):
+                        raise OrganizationQuotaExceededError(
+                            "too many active tasks for this organization"
+                        )
+                    if int(counts["today"]) >= int(organization["daily_job_limit"]):
+                        raise OrganizationQuotaExceededError(
+                            "daily task limit reached for this organization"
+                        )
                 record = await connection.fetchrow(
                     """
                     INSERT INTO jobs
-                        (id, owner_id, title, prompt, route, status, stage, progress)
-                    VALUES ($1, $2, $3, $4, $5, $6, $6, 0)
+                        (id, owner_id, org_id, title, prompt, route,
+                         status, stage, progress)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 0)
                     RETURNING *
                     """,
                     job_id,
                     owner_id,
+                    org_id,
                     title,
                     prompt,
                     route.value,
@@ -109,6 +154,197 @@ class JobRepository:
             max(1, min(limit, 100)),
         )
         return [dict(record) for record in records]
+
+    async def record_turn_usage(
+        self,
+        job_id: UUID,
+        org_id: UUID,
+        end_user_id: UUID,
+        *,
+        turn_id: str,
+        input_tokens: int,
+        output_tokens: int,
+        cumulative_images: int,
+        cumulative_pages: int,
+        price_input_token: float,
+        price_output_token: float,
+        price_image: float,
+    ) -> dict[str, Any] | None:
+        """Record one turn's metering delta and settle its charge atomically.
+
+        Idempotency key is the Codex turn id, so a crash/lease-recovery re-run of the
+        same turn cannot double-bill. Tokens are per-turn from the runner; images/pages
+        are cumulative on disk, so the per-turn delta subtracts earlier turns' totals.
+
+        Settlement: the first billed turn reconciles the creation-time hold
+        (refund or extra-charge the gap to the real cost); later turns charge the
+        real cost directly. Balance may go negative, capped by the per-job hold risk.
+        Returns the usage row plus the charged cost, or None if already billed.
+        """
+        turn_id = turn_id.strip()
+        if not turn_id:
+            raise ValueError("turn_id is required for idempotent billing")
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                job = await connection.fetchrow(
+                    "SELECT billed_turns, held_amount FROM jobs WHERE id = $1 FOR UPDATE",
+                    job_id,
+                )
+                if job is None:
+                    return None
+                held_amount = float(job["held_amount"])
+                totals = await connection.fetchrow(
+                    """
+                    SELECT COALESCE(SUM(images), 0) AS images,
+                           COALESCE(SUM(pages), 0) AS pages
+                    FROM usage_records
+                    WHERE job_id = $1
+                    """,
+                    job_id,
+                )
+                images_delta = max(0, cumulative_images - int(totals["images"]))
+                pages_delta = max(0, cumulative_pages - int(totals["pages"]))
+                safe_input = max(0, input_tokens)
+                safe_output = max(0, output_tokens)
+                actual_cost = round(
+                    safe_input * price_input_token
+                    + safe_output * price_output_token
+                    + images_delta * price_image,
+                    4,
+                )
+                record = await connection.fetchrow(
+                    """
+                    INSERT INTO usage_records
+                        (id, org_id, end_user_id, job_id, turn_id,
+                         input_tokens, output_tokens, images, pages, charged_credits)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ON CONFLICT (job_id, turn_id) DO NOTHING
+                    RETURNING *
+                    """,
+                    uuid4(),
+                    org_id,
+                    end_user_id,
+                    job_id,
+                    turn_id,
+                    safe_input,
+                    safe_output,
+                    images_delta,
+                    pages_delta,
+                    actual_cost,
+                )
+                if record is None:
+                    return None
+                await connection.execute(
+                    "UPDATE jobs SET billed_turns = billed_turns + 1 WHERE id = $1",
+                    job_id,
+                )
+                if held_amount > 0:
+                    # Reconcile the actual hold reserved for this turn, then clear it.
+                    delta = round(held_amount - actual_cost, 4)
+                    reason = "settle_refund" if delta >= 0 else "settle_extra"
+                    await connection.execute(
+                        "UPDATE jobs SET held_amount = 0 WHERE id = $1",
+                        job_id,
+                    )
+                else:
+                    # A recovered legacy turn may have no outstanding hold.
+                    delta = -round(actual_cost, 4)
+                    reason = "settle_extra"
+                balance_after = await connection.fetchval(
+                    """
+                    UPDATE organizations
+                    SET credit_balance = credit_balance + $2
+                    WHERE id = $1
+                    RETURNING credit_balance
+                    """,
+                    org_id,
+                    delta,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO credit_transactions
+                        (id, org_id, amount, reason, job_id, balance_after)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    uuid4(),
+                    org_id,
+                    delta,
+                    reason,
+                    job_id,
+                    balance_after,
+                )
+                result = dict(record)
+                result["actual_cost"] = round(actual_cost, 4)
+                return result
+
+    async def get_job_usage(self, job_id: UUID) -> dict[str, Any]:
+        """Aggregate one job's metered usage and the credits we charged for it."""
+        usage = await self.database.require_pool().fetchrow(
+            """
+            SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(images), 0) AS images,
+                   COALESCE(SUM(pages), 0) AS pages,
+                   COALESCE(SUM(charged_credits), 0) AS charged_credits,
+                   COUNT(*) AS turns
+            FROM usage_records
+            WHERE job_id = $1
+            """,
+            job_id,
+        )
+        return {
+            "input_tokens": int(usage["input_tokens"]),
+            "output_tokens": int(usage["output_tokens"]),
+            "images": int(usage["images"]),
+            "pages": int(usage["pages"]),
+            "turns": int(usage["turns"]),
+            "our_charge": float(usage["charged_credits"]),
+        }
+
+    async def aggregate_org_usage(
+        self,
+        org_id: UUID,
+        *,
+        external_id: str | None = None,
+        since: Any | None = None,
+        until: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregate an org's usage grouped by enterprise end-user (external_id)."""
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT u.external_id AS end_user_id,
+                   COALESCE(SUM(ur.input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(ur.output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(ur.images), 0) AS images,
+                   COALESCE(SUM(ur.pages), 0) AS pages,
+                   COALESCE(SUM(ur.charged_credits), 0) AS our_charge,
+                   COUNT(DISTINCT ur.job_id) AS jobs
+            FROM usage_records AS ur
+            JOIN users AS u ON u.id = ur.end_user_id
+            WHERE ur.org_id = $1
+              AND ($2::text IS NULL OR u.external_id = $2)
+              AND ($3::timestamptz IS NULL OR ur.created_at >= $3)
+              AND ($4::timestamptz IS NULL OR ur.created_at < $4)
+            GROUP BY u.external_id
+            ORDER BY u.external_id
+            """,
+            org_id,
+            external_id,
+            since,
+            until,
+        )
+        return [
+            {
+                "end_user_id": record["end_user_id"],
+                "input_tokens": int(record["input_tokens"]),
+                "output_tokens": int(record["output_tokens"]),
+                "images": int(record["images"]),
+                "pages": int(record["pages"]),
+                "our_charge": float(record["our_charge"]),
+                "jobs": int(record["jobs"]),
+            }
+            for record in records
+        ]
 
     async def set_status(
         self,

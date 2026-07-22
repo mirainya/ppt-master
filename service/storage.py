@@ -91,6 +91,7 @@ class WorkspaceProgress:
     image_generation_state: str | None
     image_generation_updated: bool
     image_generation_count: int
+    image_generation_total: int
 
 
 @dataclass(frozen=True)
@@ -245,19 +246,27 @@ class JobStorage:
         )
         image_generation_state: str | None = None
         image_generation_count = 0
+        image_generation_total = 0
         image_audit_path = self.job_dir(job_id) / "control" / "image_generation.json"
         image_generation_updated = (
             image_audit_path.is_file()
             and image_audit_path.stat().st_mtime >= changed_after
         )
-        if image_generation_updated:
+        # The cumulative total drives metering and must be read regardless of the
+        # mtime gate, which only governs the transient progress fields below.
+        if image_audit_path.is_file():
             try:
                 image_audit = json.loads(image_audit_path.read_text(encoding="utf-8"))
-                image_generation_state = str(image_audit.get("state", "")) or None
-                image_generation_count = max(
+                image_generation_total = max(
                     0,
-                    int(image_audit.get("item_count", 0)),
+                    int(image_audit.get("cumulative_total", 0)),
                 )
+                if image_generation_updated:
+                    image_generation_state = str(image_audit.get("state", "")) or None
+                    image_generation_count = max(
+                        0,
+                        int(image_audit.get("item_count", 0)),
+                    )
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 image_generation_state = None
         return WorkspaceProgress(
@@ -268,6 +277,7 @@ class JobStorage:
             image_generation_state=image_generation_state,
             image_generation_updated=image_generation_updated,
             image_generation_count=image_generation_count,
+            image_generation_total=image_generation_total,
         )
 
     def discover_live_previews(self, job_id: UUID) -> list[StoredFile]:
@@ -281,15 +291,8 @@ class JobStorage:
         )
         previews: list[StoredFile] = []
         for output_page in output_pages:
-            final_page = (
-                output_page.parent.parent / "svg_final" / output_page.name
-            )
-            preview_path = output_page
-            if (
-                final_page.is_file()
-                and final_page.stat().st_mtime_ns >= output_page.stat().st_mtime_ns
-            ):
-                preview_path = final_page
+            final_page = output_page.parent.parent / "svg_final" / output_page.name
+            preview_path = final_page if final_page.is_file() else output_page
             preview = self.describe_existing(job_id, preview_path)
             logical_path = output_page.relative_to(self.job_dir(job_id)).as_posix()
             preview.id = uuid5(job_id, logical_path)

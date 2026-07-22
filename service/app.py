@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, AsyncIterator
 from uuid import UUID, uuid4
 
+from asyncpg.exceptions import UniqueViolationError
 from fastapi import (
     Depends,
     FastAPI,
@@ -26,19 +28,26 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from service.auth import (
     AuthenticatedUser,
     generate_api_key,
+    generate_org_api_key,
     generate_session_token,
     hash_password,
     hash_token,
+    is_org_api_key,
     normalize_username,
     password_needs_rehash,
     verify_missing_user,
     verify_password,
 )
 from service.auth_repository import AuthRepository
+from service.billing import BillingRepository, Pricing
 from service.config import Settings
 from service.database import Database
 from service.queue import JobQueue
-from service.repository import JobRepository
+from service.repository import (
+    JobRepository,
+    OrganizationQuotaExceededError,
+    OrganizationUnavailableError,
+)
 from service.schemas import (
     ApiKeyCreate,
     ApiKeyCreated,
@@ -49,11 +58,15 @@ from service.schemas import (
     ConfirmationSubmit,
     JobMessageSubmit,
     JobMessageRead,
+    CreditTopup,
     JobRead,
     JobRoute,
     JobStatus,
     LoginRequest,
     MessageRead,
+    OrgCreate,
+    OrgKeyCreate,
+    PricingUpdate,
     TERMINAL_STATUSES,
     UserRead,
 )
@@ -78,6 +91,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.database = database
     app.state.auth_repository = AuthRepository(database)
     app.state.repository = JobRepository(database)
+    app.state.billing_repository = BillingRepository(database)
     app.state.queue = queue
     app.state.storage = storage
     try:
@@ -104,15 +118,44 @@ def _authentication_error() -> HTTPException:
     )
 
 
+_END_USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@:-]{0,189}$")
+
+
+def _resolve_end_user_id(request: Request) -> str | None:
+    """Validate the enterprise-supplied X-End-User-Id header, or None when absent.
+
+    Rejects the reserved service sentinel and malformed values so a tenant cannot
+    collide with its own default service account or split one user across variants.
+    """
+    raw = request.headers.get("X-End-User-Id")
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if value == AuthRepository.SERVICE_EXTERNAL_ID:
+        raise HTTPException(status_code=400, detail="X-End-User-Id is reserved")
+    if not _END_USER_ID_RE.fullmatch(value):
+        raise HTTPException(status_code=400, detail="invalid X-End-User-Id")
+    return value
+
+
 async def require_user(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> AuthenticatedUser:
     repository: AuthRepository = request.app.state.auth_repository
     if credentials is not None:
-        user = await repository.authenticate_api_key(
-            hash_token(credentials.credentials)
-        )
+        token = credentials.credentials
+        token_hash = hash_token(token)
+        # Prefix is a routing hint only; fall back to personal keys on a miss so a
+        # personal key that happens to start with the org prefix still works.
+        if is_org_api_key(token):
+            org_id = await repository.authenticate_org_api_key(token_hash)
+            if org_id is not None:
+                external_id = _resolve_end_user_id(request)
+                return await repository.provision_end_user(org_id, external_id)
+        user = await repository.authenticate_api_key(token_hash)
         if user is None:
             raise _authentication_error()
         return user
@@ -136,8 +179,16 @@ async def require_browser_user(request: Request) -> AuthenticatedUser:
     return user
 
 
+async def require_admin_user(request: Request) -> AuthenticatedUser:
+    user = await require_browser_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="administrator access required")
+    return user
+
+
 CurrentUser = Annotated[AuthenticatedUser, Depends(require_user)]
 BrowserUser = Annotated[AuthenticatedUser, Depends(require_browser_user)]
+AdminUser = Annotated[AuthenticatedUser, Depends(require_admin_user)]
 
 
 def _repository(request: Request) -> JobRepository:
@@ -157,6 +208,30 @@ async def _require_job(
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return job
+
+
+async def _reserve_continuation_hold(request: Request, job: dict) -> None:
+    """Reserve the next turn before a confirmation or revision is queued."""
+    org_id = job.get("org_id")
+    if org_id is None:
+        return
+    try:
+        pricing = await request.app.state.billing_repository.get_pricing()
+        held = await request.app.state.billing_repository.hold_credits(
+            org_id,
+            job["id"],
+            pricing.hold_amount,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="billing is temporarily unavailable",
+        ) from exc
+    if not held:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="insufficient organization credit balance",
+        )
 
 
 def _select_artifacts(
@@ -348,7 +423,53 @@ async def create_job(
     repository = _repository(request)
     job_id = uuid4()
     request.app.state.storage.prepare_job(job_id)
-    job = await repository.create_job(job_id, user.id, prompt, route, title)
+    try:
+        job = await repository.create_job(
+            job_id, user.id, prompt, route, title, org_id=user.org_id
+        )
+    except OrganizationUnavailableError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except OrganizationQuotaExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+    # Hold prepaid credits after the job row exists so the hold references the job and
+    # can be released on any failure/cancel path. Reject with 402 if the balance is short.
+    if user.org_id is not None:
+        try:
+            pricing = await request.app.state.billing_repository.get_pricing()
+            held = await request.app.state.billing_repository.hold_credits(
+                user.org_id, job_id, pricing.hold_amount
+            )
+        except Exception as exc:
+            await request.app.state.billing_repository.release_hold(job_id)
+            await repository.set_status(
+                job_id,
+                JobStatus.FAILED,
+                0,
+                "Billing setup failed",
+                error={"code": "billing_unavailable", "message": str(exc)},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="billing is temporarily unavailable",
+            ) from exc
+        if not held:
+            await repository.set_status(
+                job_id,
+                JobStatus.FAILED,
+                0,
+                "Insufficient organization credit balance",
+                error={
+                    "code": "insufficient_credit",
+                    "message": "insufficient organization credit balance",
+                },
+            )
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail="insufficient organization credit balance",
+            )
     try:
         uploads = [
             *(("source", upload) for upload in files or []),
@@ -365,6 +486,7 @@ async def create_job(
             await repository.add_asset(job_id, stored_file)
         await request.app.state.queue.enqueue(job_id)
     except ValueError as exc:
+        await request.app.state.billing_repository.release_hold(job_id)
         await repository.set_status(
             job_id,
             JobStatus.FAILED,
@@ -374,6 +496,7 @@ async def create_job(
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        await request.app.state.billing_repository.release_hold(job_id)
         await repository.set_status(
             job_id,
             JobStatus.FAILED,
@@ -489,20 +612,38 @@ async def submit_confirmation(
     job = await _require_job(request, job_id, user)
     if JobStatus(job["status"]) is not JobStatus.AWAITING_CONFIRMATION:
         raise HTTPException(status_code=409, detail="job is not awaiting confirmation")
-    confirmation = await _repository(request).submit_confirmation(
-        job_id,
-        submission.approved,
-        submission.message.strip()
-        or ("确认方案" if submission.approved else "请修改方案"),
-    )
-    if confirmation is None:
-        raise HTTPException(
-            status_code=409, detail="confirmation was already submitted"
+    await _reserve_continuation_hold(request, job)
+    try:
+        confirmation = await _repository(request).submit_confirmation(
+            job_id,
+            submission.approved,
+            submission.message.strip()
+            or ("确认方案" if submission.approved else "请修改方案"),
         )
-    await _repository(request).set_status(
-        job_id, JobStatus.PLANNING, 30, "Response received"
-    )
-    await request.app.state.queue.enqueue(job_id)
+        if confirmation is None:
+            raise HTTPException(
+                status_code=409, detail="confirmation was already submitted"
+            )
+        await _repository(request).set_status(
+            job_id, JobStatus.PLANNING, 30, "Response received"
+        )
+        await request.app.state.queue.enqueue(job_id)
+    except HTTPException:
+        await request.app.state.billing_repository.release_hold(job_id)
+        raise
+    except Exception as exc:
+        await request.app.state.billing_repository.release_hold(job_id)
+        await _repository(request).set_status(
+            job_id,
+            JobStatus.FAILED,
+            job["progress"],
+            "Task could not be queued",
+            error={"code": "queue_error", "message": str(exc)},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task queue is unavailable",
+        ) from exc
     return confirmation
 
 
@@ -564,23 +705,42 @@ async def resume_job(
         raise HTTPException(
             status_code=409, detail="job cannot be resumed from its current state"
         )
-    if job["runner_session_id"]:
-        confirmation = await _repository(request).prepare_resume(
-            job_id, submission.message
-        )
-        if confirmation is None:
-            raise HTTPException(
-                status_code=409, detail="job has no previous confirmation to resume"
+    await _reserve_continuation_hold(request, job)
+    try:
+        if job["runner_session_id"]:
+            confirmation = await _repository(request).prepare_resume(
+                job_id, submission.message
             )
+            if confirmation is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="job has no previous confirmation to resume",
+                )
+            await _repository(request).set_status(
+                job_id, JobStatus.PLANNING, 30, "Revision queued"
+            )
+        else:
+            await _repository(request).prepare_restart(job_id, submission.message)
+            await _repository(request).set_status(
+                job_id, JobStatus.QUEUED, 0, "Task queued again"
+            )
+        await request.app.state.queue.enqueue(job_id)
+    except HTTPException:
+        await request.app.state.billing_repository.release_hold(job_id)
+        raise
+    except Exception as exc:
+        await request.app.state.billing_repository.release_hold(job_id)
         await _repository(request).set_status(
-            job_id, JobStatus.PLANNING, 30, "Revision queued"
+            job_id,
+            JobStatus.FAILED,
+            job["progress"],
+            "Task could not be queued",
+            error={"code": "queue_error", "message": str(exc)},
         )
-    else:
-        await _repository(request).prepare_restart(job_id, submission.message)
-        await _repository(request).set_status(
-            job_id, JobStatus.QUEUED, 0, "Task queued again"
-        )
-    await request.app.state.queue.enqueue(job_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task queue is unavailable",
+        ) from exc
     return MessageRead(message="job queued")
 
 
@@ -609,6 +769,8 @@ async def cancel_job(
             job["progress"],
             "Task cancelled",
         )
+        # Refund any outstanding hold; no-op if a turn already settled it.
+        await request.app.state.billing_repository.release_hold(job_id)
     return MessageRead(message="cancellation requested")
 
 
@@ -714,3 +876,156 @@ async def view_artifact(
         filename=artifact["filename"],
         content_disposition_type="inline",
     )
+
+
+@app.get("/v1/jobs/{job_id}/usage")
+async def job_usage(request: Request, job_id: UUID, user: CurrentUser) -> dict:
+    """Layer-2 usage receipt for one job, for the enterprise to bill its end-user."""
+    job = await _require_job(request, job_id, user)
+    usage = await _repository(request).get_job_usage(job_id)
+    end_user_id = await request.app.state.auth_repository.external_id_for_user(
+        job["owner_id"]
+    )
+    is_final = JobStatus(job["status"]) in TERMINAL_STATUSES
+    return {
+        "job_id": job_id,
+        "end_user_id": end_user_id,
+        "status": "final" if is_final else "partial",
+        "usage": {
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "images": usage["images"],
+            "pages": usage["pages"],
+            "jobs": 1,
+        },
+        "our_charge": {"credits": usage["our_charge"]},
+    }
+
+
+@app.get("/v1/orgs/usage")
+async def org_usage(
+    request: Request,
+    user: CurrentUser,
+    end_user_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict:
+    """Aggregate the caller's organization usage, grouped by enterprise end-user."""
+    if user.org_id is None:
+        raise HTTPException(status_code=403, detail="organization credentials required")
+    rows = await _repository(request).aggregate_org_usage(
+        user.org_id,
+        external_id=end_user_id,
+        since=since,
+        until=until,
+    )
+    return {"org_id": user.org_id, "end_users": rows}
+
+
+@app.post("/v1/admin/orgs", status_code=status.HTTP_201_CREATED)
+async def admin_create_org(
+    request: Request, submission: OrgCreate, admin: AdminUser
+) -> dict:
+    """Onboard an enterprise organization plus its default service account."""
+    try:
+        org = await request.app.state.auth_repository.create_organization(
+            submission.name, submission.slug
+        )
+    except UniqueViolationError as exc:
+        raise HTTPException(
+            status_code=409, detail="organization slug already exists"
+        ) from exc
+    return org
+
+
+@app.post("/v1/admin/orgs/{org_id}/keys", status_code=status.HTTP_201_CREATED)
+async def admin_create_org_key(
+    request: Request, org_id: UUID, submission: OrgKeyCreate, admin: AdminUser
+) -> dict:
+    """Issue an organization API key; the plaintext is returned exactly once."""
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    key, prefix = generate_org_api_key()
+    record = await request.app.state.auth_repository.create_org_api_key(
+        org_id, submission.name, prefix, hash_token(key)
+    )
+    return {**record, "key": key}
+
+
+@app.get("/v1/admin/orgs/{org_id}/keys")
+async def admin_list_org_keys(
+    request: Request, org_id: UUID, admin: AdminUser
+) -> list[dict]:
+    return await request.app.state.auth_repository.list_org_api_keys(org_id)
+
+
+@app.delete("/v1/admin/orgs/{org_id}/keys/{key_id}", response_model=MessageRead)
+async def admin_revoke_org_key(
+    request: Request, org_id: UUID, key_id: UUID, admin: AdminUser
+) -> MessageRead:
+    revoked = await request.app.state.auth_repository.revoke_org_api_key(org_id, key_id)
+    if not revoked:
+        raise HTTPException(status_code=404, detail="organization API key not found")
+    return MessageRead(message="organization API key revoked")
+
+
+@app.post("/v1/admin/orgs/{org_id}/credits")
+async def admin_topup_org(
+    request: Request, org_id: UUID, submission: CreditTopup, admin: AdminUser
+) -> dict:
+    """Add prepaid credits to an organization balance."""
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    balance = await request.app.state.billing_repository.topup(
+        org_id, submission.amount
+    )
+    return {"org_id": org_id, "credit_balance": balance}
+
+
+@app.get("/v1/admin/orgs/{org_id}/usage")
+async def admin_org_usage(
+    request: Request,
+    org_id: UUID,
+    admin: AdminUser,
+    end_user_id: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict:
+    """Per-end-user usage report for one organization."""
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    rows = await _repository(request).aggregate_org_usage(
+        org_id, external_id=end_user_id, since=since, until=until
+    )
+    return {"org_id": org_id, "end_users": rows}
+
+
+@app.get("/v1/admin/billing-config")
+async def admin_get_pricing(request: Request, admin: AdminUser) -> dict:
+    pricing = await request.app.state.billing_repository.get_pricing()
+    return {
+        "price_input_token": pricing.price_input_token,
+        "price_output_token": pricing.price_output_token,
+        "price_image": pricing.price_image,
+        "hold_amount": pricing.hold_amount,
+    }
+
+
+@app.put("/v1/admin/billing-config")
+async def admin_update_pricing(
+    request: Request, submission: PricingUpdate, admin: AdminUser
+) -> dict:
+    updated = await request.app.state.billing_repository.update_pricing(
+        Pricing(
+            price_input_token=submission.price_input_token,
+            price_output_token=submission.price_output_token,
+            price_image=submission.price_image,
+            hold_amount=submission.hold_amount,
+        )
+    )
+    return {
+        "price_input_token": updated.price_input_token,
+        "price_output_token": updated.price_output_token,
+        "price_image": updated.price_image,
+        "hold_amount": updated.hold_amount,
+    }

@@ -13,6 +13,7 @@ from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatc
 
 _PASSWORD_HASHER = PasswordHasher()
 _API_KEY_PREFIX = "pptm_"
+_ORG_API_KEY_PREFIX = "pptm_org_"
 _DUMMY_PASSWORD_HASH = _PASSWORD_HASHER.hash("not-a-real-user-password")
 
 
@@ -23,6 +24,7 @@ class AuthenticatedUser:
     id: UUID
     username: str
     is_admin: bool
+    org_id: UUID | None = None
 
 
 def normalize_username(username: str) -> str:
@@ -44,8 +46,14 @@ def hash_password(password: str) -> str:
     return _PASSWORD_HASHER.hash(password)
 
 
-def verify_password(password_hash: str, password: str) -> bool:
-    """Verify a supplied password without exposing hash parsing errors."""
+def verify_password(password_hash: str | None, password: str) -> bool:
+    """Verify a supplied password without exposing hash parsing errors.
+
+    Passwordless accounts (e.g. JIT-provisioned enterprise end-users with a NULL
+    hash) can never authenticate by password: return False instead of raising.
+    """
+    if not password_hash:
+        return False
     try:
         return _PASSWORD_HASHER.verify(password_hash, password)
     except (InvalidHashError, VerificationError, VerifyMismatchError):
@@ -74,6 +82,17 @@ def generate_api_key() -> tuple[str, str]:
     """Generate a bearer API key and its non-secret display prefix."""
     key = f"{_API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
     return key, key[:13]
+
+
+def generate_org_api_key() -> tuple[str, str]:
+    """Generate an organization bearer API key and its non-secret display prefix."""
+    key = f"{_ORG_API_KEY_PREFIX}{secrets.token_urlsafe(32)}"
+    return key, key[:17]
+
+
+def is_org_api_key(token: str) -> bool:
+    """Return whether a bearer token is an organization key by its prefix."""
+    return token.startswith(_ORG_API_KEY_PREFIX)
 
 
 def hash_token(token: str) -> str:

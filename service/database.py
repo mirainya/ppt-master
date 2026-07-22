@@ -55,13 +55,41 @@ class Database:
                 to_regclass('public.job_messages') AS job_messages,
                 to_regclass('public.users') AS users,
                 to_regclass('public.user_sessions') AS user_sessions,
-                to_regclass('public.user_api_keys') AS user_api_keys
+                to_regclass('public.user_api_keys') AS user_api_keys,
+                to_regclass('public.organizations') AS organizations,
+                to_regclass('public.org_api_keys') AS org_api_keys,
+                to_regclass('public.usage_records') AS usage_records,
+                to_regclass('public.credit_transactions') AS credit_transactions,
+                to_regclass('public.billing_config') AS billing_config,
+                EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'jobs'
+                      AND column_name = 'held_amount'
+                ) AS jobs_held_amount,
+                EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'usage_records'
+                      AND column_name = 'turn_id'
+                ) AS usage_turn_id,
+                EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'usage_records'
+                      AND column_name = 'charged_credits'
+                ) AS usage_charged_credits
             """
         )
-        if tables is None or any(value is None for value in tables.values()):
+        if tables is None or any(not value for value in tables.values()):
             migration_dir = (
                 Path(__file__).resolve().parent.parent / "database" / "migrations"
             )
             raise RuntimeError(
                 f"database schema is missing; apply migrations from {migration_dir}"
             )
+        pricing_exists = await self.require_pool().fetchval(
+            "SELECT EXISTS (SELECT 1 FROM billing_config WHERE id = 1)"
+        )
+        if not pricing_exists:
+            raise RuntimeError("billing_config row is missing; apply migrations")

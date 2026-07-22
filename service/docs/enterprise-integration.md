@@ -1,0 +1,141 @@
+# 企业接入指南（B2B API）
+
+面向在自家系统中集成 PPT Master 生成能力的第三方企业。终端用户无需感知本服务；企业后端用组织凭证调用，并可按终端用户单独计量。
+
+设计背景见 [`billing-design.md`](./billing-design.md)。
+
+## 1. 开通（由服务方管理员完成）
+
+企业无需自助注册。服务方管理员为每家企业开户、签发组织 API Key、充值：
+
+```bash
+# 建组织（返回 org id）
+curl -X POST https://<host>/v1/admin/orgs \
+  -H 'Content-Type: application/json' -b admin_session \
+  -d '{"name":"Acme Inc","slug":"acme"}'
+
+# 签发组织 API Key（明文仅返回一次，请妥善保存）
+curl -X POST https://<host>/v1/admin/orgs/<org_id>/keys \
+  -H 'Content-Type: application/json' -b admin_session \
+  -d '{"name":"prod"}'
+
+# 预付充值
+curl -X POST https://<host>/v1/admin/orgs/<org_id>/credits \
+  -H 'Content-Type: application/json' -b admin_session \
+  -d '{"amount":1000}'
+```
+
+组织 Key 形如 `pptm_org_xxxxx`，企业将其保存在自己后端，切勿下发到浏览器或客户端。
+
+## 2. 认证与终端用户透传
+
+企业后端调用业务接口时：
+
+- `Authorization: Bearer pptm_org_xxxxx` — 组织凭证
+- `X-End-User-Id: <企业侧用户ID>` — 可选，透传企业自己的终端用户标识
+
+同一 `X-End-User-Id` 会稳定映射到一条隔离的用户空间：不同终端用户互相看不到对方的任务，用量分别计量。不带该头时，任务归属组织的默认服务账号。
+
+## 3. 生成 PPT
+
+```bash
+curl -X POST https://<host>/v1/jobs \
+  -H 'Authorization: Bearer pptm_org_xxxxx' \
+  -H 'X-End-User-Id: cust-42' \
+  -F 'prompt=用这份材料做一份 PPT' \
+  -F 'route=generate_pptx' \
+  -F 'files=@report.pdf'
+# → 202 {"id":"<job_id>","status":"queued", ...}
+```
+
+任务是异步的。建任务时会按 `hold_amount` 预扣组织余额；余额不足返回 `402`。
+提交确认或再次修订也会为下一轮按同一 `hold_amount` 预扣；余额不足时请求返回 `402`，原确认状态不变。
+
+### 查询进度
+
+- 轮询：`GET /v1/jobs/<job_id>`（返回 `status`/`progress`）
+- 实时：`GET /v1/jobs/<job_id>/events`（SSE，支持 `Last-Event-ID` 断点续传）
+
+关键状态：`queued → intake → awaiting_confirmation → planning → executing → succeeded`（或 `failed`）。`generate_pptx` 在 `awaiting_confirmation` 处会阻塞等待确认。
+
+### 确认方案 / 修订
+
+```bash
+# 确认（approved=true）或要求修改（approved=false + message）
+curl -X POST https://<host>/v1/jobs/<job_id>/confirmation \
+  -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42' \
+  -H 'Content-Type: application/json' \
+  -d '{"approved":true,"message":""}'
+```
+
+### 下载产物
+
+```bash
+curl https://<host>/v1/jobs/<job_id>/artifacts \
+  -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42'
+# 逐个下载
+curl -OJ https://<host>/v1/jobs/<job_id>/artifacts/<artifact_id>/download \
+  -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42'
+```
+
+## 4. 计量与计费
+
+本服务按 **token + 生图** 的真实成本扣组织预付余额（第 1 层）。企业按下面的用量凭证，用自己的定价向终端用户计费（第 2 层，本服务不参与）。
+
+### 单任务用量凭证
+
+```bash
+curl https://<host>/v1/jobs/<job_id>/usage \
+  -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42'
+```
+
+```json
+{
+  "job_id": "...",
+  "end_user_id": "cust-42",
+  "status": "final",
+  "usage": {"input_tokens": 12000, "output_tokens": 3400, "images": 5, "pages": 12, "jobs": 1},
+  "our_charge": {"credits": 0.2736}
+}
+```
+
+- `status`：`partial`（任务或修订进行中）/ `final`（彻底完成）。**请在 `final` 后再对终端用户结账**——修订会追加用量。
+- `usage`：原始计量维度，企业按需定价。
+- `our_charge.credits`：本服务对该任务扣组织的真实成本，供对账参考。
+
+### 按终端用户聚合（出账）
+
+```bash
+curl 'https://<host>/v1/orgs/usage?end_user_id=cust-42&since=2026-07-01T00:00:00Z' \
+  -H 'Authorization: Bearer pptm_org_xxxxx'
+```
+
+返回该组织每个终端用户的用量与成本汇总，用于周期性出账。
+
+## 5. 数据隔离说明
+
+- 逻辑隔离：企业之间、企业内终端用户之间的任务与产物互相不可见（基于所有者鉴权）。
+- 物理存储未按组织分目录（同一运行目录混放），仅靠接口鉴权隔离。对物理隔离有合规要求的场景需另行约定。
+
+## 6. Python 示例
+
+```python
+import httpx
+
+BASE = "https://<host>"
+HEADERS = {"Authorization": "Bearer pptm_org_xxxxx", "X-End-User-Id": "cust-42"}
+
+with httpx.Client(base_url=BASE, headers=HEADERS) as client:
+    job = client.post(
+        "/v1/jobs",
+        data={"prompt": "用这份材料做一份 PPT", "route": "generate_pptx"},
+        files={"files": open("report.pdf", "rb")},
+    ).json()
+    job_id = job["id"]
+
+    # 轮询到完成（省略确认阶段处理）
+    # ...
+
+    usage = client.get(f"/v1/jobs/{job_id}/usage").json()
+    print(usage["usage"], usage["our_charge"])
+```

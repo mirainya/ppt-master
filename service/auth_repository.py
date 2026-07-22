@@ -169,4 +169,160 @@ class AuthRepository:
             id=record["id"],
             username=record["username"],
             is_admin=record["is_admin"],
+            org_id=record["org_id"] if "org_id" in record else None,
+        )
+
+    # ------------------------------------------------------------------
+    # Organizations, org API keys, and enterprise end-user provisioning
+    # ------------------------------------------------------------------
+
+    SERVICE_EXTERNAL_ID = "__service__"
+
+    async def create_organization(
+        self,
+        name: str,
+        slug: str,
+    ) -> dict[str, Any]:
+        """Create an organization plus its default service end-user account."""
+        org_id = uuid4()
+        async with self.database.require_pool().acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    INSERT INTO organizations (id, name, slug)
+                    VALUES ($1, $2, $3)
+                    RETURNING *
+                    """,
+                    org_id,
+                    name,
+                    slug,
+                )
+                service_user_id = uuid4()
+                await connection.execute(
+                    """
+                    INSERT INTO users (id, username, password_hash, is_admin,
+                                       org_id, external_id)
+                    VALUES ($1, $2, NULL, FALSE, $3, $4)
+                    """,
+                    service_user_id,
+                    str(service_user_id),
+                    org_id,
+                    self.SERVICE_EXTERNAL_ID,
+                )
+        return dict(record)
+
+    async def authenticate_org_api_key(self, token_hash: str) -> UUID | None:
+        """Return the org id for an active, non-revoked org key, else None."""
+        record = await self.database.require_pool().fetchrow(
+            """
+            UPDATE org_api_keys AS api_key
+            SET last_used_at = CURRENT_TIMESTAMP
+            FROM organizations AS org
+            WHERE api_key.token_hash = $1
+              AND api_key.revoked_at IS NULL
+              AND org.id = api_key.org_id
+              AND org.status = 'active'
+            RETURNING org.id
+            """,
+            token_hash,
+        )
+        return record["id"] if record is not None else None
+
+    async def create_org_api_key(
+        self,
+        org_id: UUID,
+        name: str,
+        key_prefix: str,
+        token_hash: str,
+    ) -> dict[str, Any]:
+        record = await self.database.require_pool().fetchrow(
+            """
+            INSERT INTO org_api_keys (id, org_id, name, key_prefix, token_hash)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, name, key_prefix, last_used_at, revoked_at, created_at
+            """,
+            uuid4(),
+            org_id,
+            name,
+            key_prefix,
+            token_hash,
+        )
+        return dict(record)
+
+    async def external_id_for_user(self, user_id: UUID) -> str | None:
+        """Return the enterprise external id for an end-user, or None."""
+        return await self.database.require_pool().fetchval(
+            "SELECT external_id FROM users WHERE id = $1",
+            user_id,
+        )
+
+    async def list_org_api_keys(self, org_id: UUID) -> list[dict[str, Any]]:
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT id, name, key_prefix, last_used_at, revoked_at, created_at
+            FROM org_api_keys
+            WHERE org_id = $1
+            ORDER BY created_at DESC
+            """,
+            org_id,
+        )
+        return [dict(record) for record in records]
+
+    async def revoke_org_api_key(self, org_id: UUID, key_id: UUID) -> bool:
+        result = await self.database.require_pool().execute(
+            """
+            UPDATE org_api_keys
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE id = $1 AND org_id = $2 AND revoked_at IS NULL
+            """,
+            key_id,
+            org_id,
+        )
+        return result == "UPDATE 1"
+
+    async def get_organization(self, org_id: UUID) -> dict[str, Any] | None:
+        record = await self.database.require_pool().fetchrow(
+            "SELECT * FROM organizations WHERE id = $1",
+            org_id,
+        )
+        return dict(record) if record else None
+
+    async def provision_end_user(
+        self,
+        org_id: UUID,
+        external_id: str | None,
+    ) -> AuthenticatedUser:
+        """Find or create the end-user for (org_id, external_id); JIT provision."""
+        resolved_external = external_id or self.SERVICE_EXTERNAL_ID
+        pool = self.database.require_pool()
+        record = await pool.fetchrow(
+            """
+            SELECT id, username, is_admin, org_id
+            FROM users
+            WHERE org_id = $1 AND external_id = $2
+            """,
+            org_id,
+            resolved_external,
+        )
+        if record is None:
+            new_id = uuid4()
+            record = await pool.fetchrow(
+                """
+                INSERT INTO users (id, username, password_hash, is_admin,
+                                   org_id, external_id)
+                VALUES ($1, $2, NULL, FALSE, $3, $4)
+                ON CONFLICT (org_id, external_id) DO UPDATE
+                    SET external_id = EXCLUDED.external_id
+                RETURNING id, username, is_admin, org_id
+                """,
+                new_id,
+                str(new_id),
+                org_id,
+                resolved_external,
+            )
+        return AuthenticatedUser(
+            id=record["id"],
+            username=record["username"],
+            is_admin=record["is_admin"],
+            org_id=record["org_id"],
         )
