@@ -27,11 +27,15 @@ Set these values in `.env`:
 ```dotenv
 PPT_API_DOMAIN=ppt.example.com
 PPT_POSTGRES_PASSWORD=<random-database-password>
+PPT_RUNTIME_CONFIG_KEY=<Fernet-key>
+OPENAI_BASE_URL=
 OPENAI_API_KEY=<worker-model-key>
+PPT_RUNNER_MODEL=
 PPT_IMAGE_API_KEY=<image-provider-key>
 PPT_IMAGE_BASE_URL=https://prism.example.com/v1
 PPT_IMAGE_MODEL=gpt_image2
 PPT_IMAGE_SIZE=2048x1536
+PPT_IMAGE_CONCURRENCY=auto
 PPT_SESSION_DAYS=30
 PPT_JOB_LEASE_SECONDS=30
 PPT_JOB_HEARTBEAT_SECONDS=5
@@ -69,6 +73,26 @@ Check the deployment:
 docker compose ps
 curl https://ppt.example.com/health
 ```
+
+For a 4 GiB host that already runs PostgreSQL, Redis, and Nginx, use the standalone
+low-memory Compose file:
+
+```bash
+docker compose -f compose.linux-4g.yaml build
+docker compose -f compose.linux-4g.yaml run --rm api python -m service.migrate --apply --confirm APPLY
+docker compose -f compose.linux-4g.yaml up -d api worker
+```
+
+Set `PPT_DATABASE_URL` and `PPT_REDIS_URL` to the host services in `.env`. Serve
+`frontend/dist` from `/www/wwwroot/ppt.example.com`. Use
+`deploy/nginx/ppt-master.http.conf` for a new HTTP site, or include
+`deploy/nginx/ppt-master.locations.conf` in an existing HTTPS server block. The API binds only to
+`127.0.0.1:18000` in this mode.
+
+Administrators can update Codex and image-provider settings from the account settings button.
+Provider API keys are encrypted with `PPT_RUNTIME_CONFIG_KEY`, are never returned by the API, and
+take effect when the worker starts the next queued job. Automatic image concurrency uses the
+current manifest's pending image count.
 
 The health response reports `worker: ok` after the worker publishes its first heartbeat. The Codex
 SDK thread uses native web search for topic research. Arbitrary shell networking remains disabled.

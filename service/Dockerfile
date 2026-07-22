@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/pptmaster \
     CODEX_HOME=/home/pptmaster/.codex
 
-RUN apt-get update \
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.cloud.tencent.com/debian|g' \
+        /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o Acquire::https::Timeout=30 update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -25,9 +27,13 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY service/requirements.lock /app/service/requirements.lock
-RUN python -m pip install --require-hashes -r /app/service/requirements.lock
+RUN python -m pip install \
+        --index-url https://mirrors.cloud.tencent.com/pypi/simple \
+        --require-hashes \
+        -r /app/service/requirements.lock
 
-RUN python -m playwright install --with-deps chromium \
+RUN PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright \
+        python -m playwright install --with-deps chromium \
     && chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}" \
     && fc-cache -f
 

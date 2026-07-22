@@ -38,6 +38,15 @@ services:
       PPT_SESSION_DAYS: ${PPT_SESSION_DAYS:-30}
       PPT_JOB_LEASE_SECONDS: ${PPT_JOB_LEASE_SECONDS:-30}
       PPT_JOB_HEARTBEAT_SECONDS: ${PPT_JOB_HEARTBEAT_SECONDS:-5}
+      PPT_RUNTIME_CONFIG_KEY: ${PPT_RUNTIME_CONFIG_KEY:?Set PPT_RUNTIME_CONFIG_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      PPT_RUNNER_MODEL: ${PPT_RUNNER_MODEL:-}
+      PPT_IMAGE_API_KEY: ${PPT_IMAGE_API_KEY:-}
+      PPT_IMAGE_BASE_URL: ${PPT_IMAGE_BASE_URL:-https://prism.example.com/v1}
+      PPT_IMAGE_MODEL: ${PPT_IMAGE_MODEL:-gpt_image2}
+      PPT_IMAGE_SIZE: ${PPT_IMAGE_SIZE:-2048x1536}
+      PPT_IMAGE_CONCURRENCY: ${PPT_IMAGE_CONCURRENCY:-auto}
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,17 +96,20 @@ services:
     init: true
     shm_size: "1gb"
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       PPT_DATABASE_URL: postgresql://ppt_master:${PPT_POSTGRES_PASSWORD}@postgres:5432/ppt_master
       PPT_REDIS_URL: redis://redis:6379/0
       PPT_RUNTIME_ROOT: /app/runtime/jobs
       PPT_JOB_LEASE_SECONDS: ${PPT_JOB_LEASE_SECONDS:-30}
       PPT_JOB_HEARTBEAT_SECONDS: ${PPT_JOB_HEARTBEAT_SECONDS:-5}
+      PPT_RUNTIME_CONFIG_KEY: ${PPT_RUNTIME_CONFIG_KEY:?Set PPT_RUNTIME_CONFIG_KEY}
       PPT_RUNNER_MODEL: ${PPT_RUNNER_MODEL:-}
-      PPT_IMAGE_API_KEY: ${PPT_IMAGE_API_KEY:?Set PPT_IMAGE_API_KEY}
+      PPT_IMAGE_API_KEY: ${PPT_IMAGE_API_KEY:-}
       PPT_IMAGE_BASE_URL: ${PPT_IMAGE_BASE_URL:-https://prism.example.com/v1}
       PPT_IMAGE_MODEL: ${PPT_IMAGE_MODEL:-gpt_image2}
       PPT_IMAGE_SIZE: ${PPT_IMAGE_SIZE:-2048x1536}
+      PPT_IMAGE_CONCURRENCY: ${PPT_IMAGE_CONCURRENCY:-auto}
       CODEX_HOME: /home/pptmaster/.codex
     depends_on:
       postgres:

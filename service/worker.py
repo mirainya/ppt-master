@@ -16,6 +16,7 @@ from service.database import Database
 from service.queue import JobClaim, JobQueue
 from service.reference_catalog import reference_case_labels
 from service.repository import JobRepository
+from service.runtime_config import RuntimeConfigRepository
 from service.schemas import JobStatus, TERMINAL_STATUSES
 from service.storage import JobStorage, RevisionScope
 
@@ -641,10 +642,11 @@ async def run_worker() -> None:
     database = Database(settings.database_url)
     queue = JobQueue(settings.redis_url, settings.queue_name)
     storage = JobStorage(settings.runtime_root, settings.max_upload_bytes)
-    runner = AgentRunner(settings)
     await database.connect()
     await database.verify_schema()
     await queue.healthcheck()
+    runtime_config_repository = RuntimeConfigRepository(database, settings)
+    runner = AgentRunner(settings, await runtime_config_repository.get())
     await runner.open()
     repository = JobRepository(database)
     billing = BillingRepository(database)
@@ -677,6 +679,7 @@ async def run_worker() -> None:
             )
             acknowledge = False
             try:
+                await runner.reconfigure(await runtime_config_repository.get())
                 await _process_job(
                     claim.job_id,
                     repository,

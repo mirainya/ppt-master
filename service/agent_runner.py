@@ -22,6 +22,7 @@ from openai_codex import (
 
 from service.config import Settings
 from service.reference_catalog import ReferenceCase, load_reference_cases
+from service.runtime_config import RuntimeConfig
 from service.storage import RevisionScope
 
 
@@ -73,8 +74,9 @@ class AgentRunCancelled(RuntimeError):
 class AgentRunner:
     """Run one persistent Codex thread per PPT task."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, runtime_config: RuntimeConfig) -> None:
         self.settings = settings
+        self.runtime_config = runtime_config
         self.reference_cases: list[ReferenceCase] = load_reference_cases(
             settings.repo_root
         )
@@ -95,6 +97,7 @@ class AgentRunner:
             CodexConfig(
                 config_overrides=tuple(overrides),
                 cwd=str(self.settings.repo_root),
+                env=self._codex_env(),
             )
         )
         try:
@@ -103,6 +106,17 @@ class AgentRunner:
             await codex.close()
             raise
         self._codex = codex
+
+    async def reconfigure(self, runtime_config: RuntimeConfig) -> None:
+        """Apply provider settings before the next queued job starts."""
+        changed = (
+            runtime_config.process_fingerprint
+            != self.runtime_config.process_fingerprint
+        )
+        self.runtime_config = runtime_config
+        if changed and self._codex is not None:
+            await self.close()
+            await self.open()
 
     async def close(self) -> None:
         """Stop the SDK app-server and release its child runtime."""
@@ -182,7 +196,7 @@ Use paths relative to the task directory in `artifact_paths`.
             config=self._thread_config(job_dir),
             cwd=str(job_dir),
             developer_instructions=self._developer_instructions(),
-            model=self.settings.runner_model or None,
+            model=self.runtime_config.codex_model or None,
             sandbox=Sandbox.workspace_write,
         )
         await on_progress(
@@ -248,7 +262,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
             config=self._thread_config(job_dir),
             cwd=str(job_dir),
             developer_instructions=self._developer_instructions(),
-            model=self.settings.runner_model or None,
+            model=self.runtime_config.codex_model or None,
             sandbox=Sandbox.workspace_write,
         )
         return await self._run(
@@ -271,7 +285,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
             instruction,
             approval_mode=ApprovalMode.deny_all,
             cwd=str(job_dir),
-            model=self.settings.runner_model or None,
+            model=self.runtime_config.codex_model or None,
             output_schema=_RESULT_SCHEMA,
             sandbox=Sandbox.workspace_write,
         )
@@ -387,7 +401,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
         return self._codex
 
     def _thread_config(self, job_dir: Path) -> dict[str, Any] | None:
-        if not self.settings.image_generation_enabled:
+        if not self.runtime_config.image_generation_enabled:
             return None
         return {
             "mcp_servers": {
@@ -397,12 +411,13 @@ Keep the confirmed visual references in effect. Return their ids and paths again
                     "cwd": str(self.settings.repo_root),
                     "env": {
                         "PPT_IMAGE_JOB_DIR": str(job_dir),
-                        "PPT_IMAGE_SIZE": self.settings.image_size,
+                        "PPT_IMAGE_SIZE": self.runtime_config.image_size,
                     },
                     "env_vars": [
                         "PPT_IMAGE_API_KEY",
                         "PPT_IMAGE_BASE_URL",
                         "PPT_IMAGE_MODEL",
+                        "PPT_IMAGE_CONCURRENCY",
                     ],
                     "enabled_tools": ["generate_image_manifest"],
                     "default_tools_approval_mode": "approve",
@@ -418,7 +433,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
         }
 
     def _developer_instructions(self) -> str:
-        if not self.settings.image_generation_enabled:
+        if not self.runtime_config.image_generation_enabled:
             return ""
         return """
 Remote image-generation security rule:
@@ -427,6 +442,25 @@ Remote image-generation security rule:
 - Then call the ppt_images generate_image_manifest MCP tool with that manifest path.
 - Use only the generated files returned by the tool and continue the PPT Master workflow.
 """.strip()
+
+    def _codex_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        values = {
+            "OPENAI_API_KEY": self.runtime_config.codex_api_key,
+            "OPENAI_BASE_URL": self.runtime_config.codex_base_url,
+            "PPT_IMAGE_API_KEY": self.runtime_config.image_api_key,
+            "PPT_IMAGE_BASE_URL": self.runtime_config.image_base_url,
+            "PPT_IMAGE_MODEL": self.runtime_config.image_model,
+            "PPT_IMAGE_CONCURRENCY": str(
+                self.runtime_config.image_concurrency or 0
+            ),
+        }
+        for name, value in values.items():
+            if value:
+                env[name] = value
+            else:
+                env.pop(name, None)
+        return env
 
     @staticmethod
     def _turn_metering(

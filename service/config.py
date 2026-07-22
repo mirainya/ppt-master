@@ -21,6 +21,19 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _optional_positive_int(name: str) -> int | None:
+    raw_value = os.environ.get(name, "").strip().lower()
+    if raw_value in {"", "0", "auto"}:
+        return None
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer or auto") from exc
+    if not 1 <= value <= 20:
+        raise ValueError(f"{name} must be between 1 and 20")
+    return value
+
+
 def _boolean(name: str, default: bool) -> bool:
     raw_value = os.environ.get(name, str(default)).strip().lower()
     if raw_value in {"1", "true", "yes", "on"}:
@@ -45,11 +58,15 @@ class Settings:
     max_upload_bytes: int
     sse_poll_seconds: float
     runner_model: str
+    runner_api_key: str
+    runner_base_url: str
     runner_timeout_seconds: int
+    runtime_config_key: str
     image_api_key: str
     image_base_url: str
     image_model: str
     image_size: str
+    image_concurrency: int | None
     repo_root: Path
 
     @classmethod
@@ -74,11 +91,15 @@ class Settings:
             max_upload_bytes=_positive_int("PPT_MAX_UPLOAD_MB", 100) * 1024 * 1024,
             sse_poll_seconds=poll_milliseconds / 1000,
             runner_model=os.environ.get("PPT_RUNNER_MODEL", ""),
+            runner_api_key=os.environ.get("OPENAI_API_KEY", "").strip(),
+            runner_base_url=os.environ.get("OPENAI_BASE_URL", "").strip(),
             runner_timeout_seconds=_positive_int("PPT_RUNNER_TIMEOUT_SECONDS", 14_400),
+            runtime_config_key=os.environ.get("PPT_RUNTIME_CONFIG_KEY", "").strip(),
             image_api_key=os.environ.get("PPT_IMAGE_API_KEY", "").strip(),
             image_base_url=os.environ.get("PPT_IMAGE_BASE_URL", "").strip(),
             image_model=os.environ.get("PPT_IMAGE_MODEL", "").strip(),
             image_size=os.environ.get("PPT_IMAGE_SIZE", "2048x1536").strip(),
+            image_concurrency=_optional_positive_int("PPT_IMAGE_CONCURRENCY"),
             repo_root=repo_root,
         )
 
@@ -88,11 +109,10 @@ class Settings:
             raise RuntimeError(
                 "PPT_JOB_HEARTBEAT_SECONDS must be less than PPT_JOB_LEASE_SECONDS"
             )
-        image_values = (self.image_api_key, self.image_base_url, self.image_model)
-        if any(image_values) and not all(image_values):
+        if self.image_api_key and not (self.image_base_url and self.image_model):
             raise RuntimeError(
-                "PPT_IMAGE_API_KEY, PPT_IMAGE_BASE_URL, and PPT_IMAGE_MODEL "
-                "must be configured together"
+                "PPT_IMAGE_BASE_URL and PPT_IMAGE_MODEL are required when "
+                "PPT_IMAGE_API_KEY is set"
             )
         if self.image_base_url:
             parsed = urlparse(self.image_base_url)

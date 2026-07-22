@@ -61,6 +61,7 @@ class Database:
                 to_regclass('public.usage_records') AS usage_records,
                 to_regclass('public.credit_transactions') AS credit_transactions,
                 to_regclass('public.billing_config') AS billing_config,
+                to_regclass('public.service_runtime_config') AS service_runtime_config,
                 EXISTS (
                     SELECT 1 FROM information_schema.columns
                     WHERE table_schema = 'public'
@@ -93,3 +94,10 @@ class Database:
         )
         if not pricing_exists:
             raise RuntimeError("billing_config row is missing; apply migrations")
+        runtime_config_exists = await self.require_pool().fetchval(
+            "SELECT EXISTS (SELECT 1 FROM service_runtime_config WHERE id = 1)"
+        )
+        if not runtime_config_exists:
+            raise RuntimeError(
+                "service_runtime_config row is missing; apply migrations"
+            )

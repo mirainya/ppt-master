@@ -160,6 +160,38 @@ class UserRead(BaseModel):
     org_id: UUID | None = None
 
 
+class AdminUserCreate(BaseModel):
+    """Administrator request to create a local password account."""
+
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=12, max_length=1024)
+    is_admin: bool = False
+
+
+class AdminUserStatusUpdate(BaseModel):
+    """Administrator request to enable or disable a local account."""
+
+    disabled: bool
+
+
+class AdminUserPasswordUpdate(BaseModel):
+    """Administrator request to replace a local account password."""
+
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class AdminUserRead(BaseModel):
+    """Local account details visible to administrators."""
+
+    id: UUID
+    username: str
+    is_admin: bool
+    disabled: bool
+    active_api_key_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
 class OrgTicketCreated(BaseModel):
     """One-time workbench login ticket issued to an organization backend."""
 
@@ -222,3 +254,32 @@ class PricingUpdate(BaseModel):
     price_output_token: float = Field(ge=0, allow_inf_nan=False)
     price_image: float = Field(ge=0, allow_inf_nan=False)
     hold_amount: float = Field(ge=0, allow_inf_nan=False)
+
+
+class RuntimeConfigRead(BaseModel):
+    """Administrator-safe provider configuration without plaintext API keys."""
+
+    codex_base_url: str
+    codex_api_key_configured: bool
+    codex_model: str
+    image_base_url: str
+    image_api_key_configured: bool
+    image_model: str
+    image_size: str
+    image_concurrency: int | None
+    updated_at: datetime | None
+
+
+class RuntimeConfigUpdate(BaseModel):
+    """Provider configuration update; omitted API keys retain current secrets."""
+
+    codex_base_url: str = Field(default="", max_length=2048)
+    codex_api_key: str | None = Field(default=None, max_length=4096)
+    clear_codex_api_key: bool = False
+    codex_model: str = Field(default="", max_length=200)
+    image_base_url: str = Field(default="", max_length=2048)
+    image_api_key: str | None = Field(default=None, max_length=4096)
+    clear_image_api_key: bool = False
+    image_model: str = Field(default="", max_length=200)
+    image_size: str = Field(default="2048x1536", max_length=32)
+    image_concurrency: int | None = Field(default=None, ge=1, le=20)

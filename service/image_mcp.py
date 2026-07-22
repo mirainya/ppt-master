@@ -45,6 +45,23 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _image_concurrency(pending_count: int) -> int:
+    raw_value = os.environ.get("PPT_IMAGE_CONCURRENCY", "0").strip().lower()
+    if raw_value in {"", "0", "auto"}:
+        return max(1, pending_count)
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            "PPT_IMAGE_CONCURRENCY must be an integer or auto"
+        ) from exc
+    if not 1 <= value <= _MAX_ITEMS:
+        raise RuntimeError(
+            f"PPT_IMAGE_CONCURRENCY must be between 1 and {_MAX_ITEMS}"
+        )
+    return value
+
+
 def _job_dir() -> Path:
     path = Path(_required_env("PPT_IMAGE_JOB_DIR")).resolve()
     if not path.is_dir():
@@ -196,6 +213,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         for item in payload["items"]
         if item["status"] in {"Pending", "Failed"}
     ]
+    concurrency = _image_concurrency(len(pending_files))
 
     def generated_this_call() -> int:
         return sum(
@@ -210,6 +228,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         "item_count": len(payload["items"]),
         "pending_files": pending_files,
         "requested_image_size": image_size,
+        "concurrency": concurrency,
         # Preserve the running total across running/failed writes (see _write_audit).
         "cumulative_total": prior_total,
     }
@@ -217,7 +236,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
     os.environ.update(
         {
             "IMAGE_BACKEND": "openai",
-            "IMAGE_CONCURRENCY": "2",
+            "IMAGE_CONCURRENCY": str(concurrency),
             "OPENAI_API_KEY": api_key,
             "OPENAI_BASE_URL": base_url,
             "OPENAI_MODEL": model,
@@ -234,7 +253,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
                 payload,
                 str(manifest),
                 backend,
-                initial_concurrency=2,
+                initial_concurrency=concurrency,
                 image_size="1K",
                 output_dir=str(manifest.parent),
                 model=model,
