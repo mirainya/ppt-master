@@ -212,7 +212,7 @@ class JobStorage:
         )
 
     def discover_artifacts(self, job_id: UUID) -> list[StoredFile]:
-        workspace = self.job_dir(job_id) / "workspace"
+        workspace = self.job_dir(job_id)
         candidates: list[Path] = []
         for suffix in ("pptx", "pdf"):
             matches = list(workspace.glob(f"**/exports/*.{suffix}"))
@@ -227,7 +227,7 @@ class JobStorage:
         job_id: UUID,
         changed_after: float = 0,
     ) -> WorkspaceProgress:
-        workspace = self.job_dir(job_id) / "workspace"
+        workspace = self.job_dir(job_id)
         pages = {
             path
             for path in workspace.glob("**/svg_output/*.svg")
@@ -281,7 +281,7 @@ class JobStorage:
         )
 
     def discover_live_previews(self, job_id: UUID) -> list[StoredFile]:
-        workspace = self.job_dir(job_id) / "workspace"
+        workspace = self.job_dir(job_id)
         output_pages = sorted(
             {
                 path
@@ -435,7 +435,7 @@ class JobStorage:
         return "source"
 
     def _svg_pages(self, job_id: UUID) -> list[Path]:
-        workspace = self.job_dir(job_id) / "workspace"
+        workspace = self.job_dir(job_id)
         return sorted(
             {
                 path

@@ -28,6 +28,7 @@ function previewStatusMessage(
   if (job.status === "awaiting_asset") return "等待补充素材";
   if (job.status === "failed") return "任务未完成";
   if (job.status === "cancelled") return "任务已取消";
+  if (job.status === "succeeded") return "生成完成，可下载导出文件";
   return "等待页面产出";
 }
 
