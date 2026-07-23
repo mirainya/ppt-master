@@ -88,7 +88,6 @@ class AgentRunner:
             return
         overrides = [
             'web_search="live"',
-            "sandbox_workspace_write.network_access=false",
             'shell_environment_policy.inherit="core"',
         ]
         # Codex ignores the OPENAI_BASE_URL env var for its built-in provider, so a
@@ -208,7 +207,7 @@ Use paths relative to the task directory in `artifact_paths`.
             cwd=str(job_dir),
             developer_instructions=self._developer_instructions(),
             model=self.runtime_config.codex_model or None,
-            sandbox=Sandbox.workspace_write,
+            sandbox=Sandbox.full_access,
         )
         await on_progress(
             "AI 执行会话已启动",
@@ -274,7 +273,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
             cwd=str(job_dir),
             developer_instructions=self._developer_instructions(),
             model=self.runtime_config.codex_model or None,
-            sandbox=Sandbox.workspace_write,
+            sandbox=Sandbox.full_access,
         )
         return await self._run(
             thread,
@@ -298,7 +297,7 @@ Keep the confirmed visual references in effect. Return their ids and paths again
             cwd=str(job_dir),
             model=self.runtime_config.codex_model or None,
             output_schema=_RESULT_SCHEMA,
-            sandbox=Sandbox.workspace_write,
+            sandbox=Sandbox.full_access,
         )
         events = handle.stream()
         event_task: asyncio.Task[Any] | None = None
