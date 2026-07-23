@@ -26,7 +26,7 @@ Each subdirectory contains:
 | Choice | Reason |
 |---|---|
 | rendering=`vector-illustration` | Most versatile in the catalog; ✓✓ compatible with all 14 palettes; minimal interference when used as the "origin" for palette / type comparisons |
-| palette=`cool-corporate` | Most neutral and most common; simple color behavior (HEX 60-30-10 applied directly) so it doesn't overpower the dimension under comparison |
+| palette=`cool-corporate` | Most neutral and common; clear dominant/support/accent roles keep the compared dimension visible |
 | composition=single-subject hero (§4.1 Primitive A) | One dominant subject (60-70% of canvas) — the most visually representative shape, so rendering / palette differences show up most clearly |
 
 ## How the images were generated
@@ -58,7 +58,7 @@ Generated images land in the corresponding subdirectory. Each item's `status` in
 
 | If you are deciding... | Look at |
 |---|---|
-| Which rendering to lock in Strategist h.5 | `rendering/` — scan all 20 side by side; pick the visual temperament that matches the deck |
+| Which rendering to lock in [`strategist-image.md`](../strategist-image.md) §2 | `rendering/` — scan all 20 side by side; pick the visual temperament that matches the deck |
 | Diagnosing a legacy palette lock or comparison asset | `palette/` — see how historical color behaviors shift the same subject; do not expose it as a new-flow choice |
 | Which type fits a specific image's purpose | `type/` — match the internal composition to the page's content shape |
 

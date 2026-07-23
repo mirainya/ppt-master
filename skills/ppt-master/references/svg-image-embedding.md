@@ -1,4 +1,4 @@
-> See shared-standards.md for common technical constraints.
+> See [`shared-standards-core.md`](./shared-standards-core.md) for common technical constraints.
 
 # SVG Image Embedding Guide
 
@@ -11,15 +11,10 @@ Technical spec and workflow for adding images to SVG files.
 Defined in the Design Specification & Content Outline; each image carries an `Acquire Via` field plus a status annotation. This file is authoritative for status names and SVG embedding behavior. If image approach includes "B) User-provided": run `analyze_images.py` right after the Strategist confirmation stage and complete the list before outputting the design spec.
 
 ```markdown
-| Filename | Dimensions | Purpose | Type | Acquire Via | Status | Reference |
-|----------|------------|---------|------|-------------|--------|-----------|
-| cover_bg.png | 1280x720 | Cover background | Background | ai | Pending | Modern tech abstract, deep blue gradient |
-| team.jpg | 800x600 | Team photo | Photography | web | Pending | Diverse engineering team in modern office |
-| product.png | 600x400 | Page 3 product photo | Photography | user | Existing | - |
-| formula_001.png | 736x168 | Page 3 block equation | Latex Formula | formula | Rendered | `E = mc^2` |
-| chart.png | 600x400 | Page 5 placeholder | Illustration | placeholder | Placeholder | Team collaboration scene to be added later |
-| spot_sheet.png | 1024x1024 | 2x2 spot illustration sheet, not placed | Illustration Sheet | ai | Pending | Four same-family spot illustrations on a clean grid |
-| spot_team.png | TBD after slicing | Page 4 team spot illustration | Illustration | slice | Pending | From `spot_sheet.png` cell 1,1 |
+| Filename | Dimensions | Purpose | Type | Layout pattern | Crop Policy | Acquire Via | Status | Reference |
+|----------|------------|---------|------|----------------|-------------|-------------|--------|-----------|
+| team.jpg | 800x600 | Team photo | Photography | `#2 left-third` | adaptive | web | Pending | Diverse engineering team in modern office |
+| formula_001.png | 736x168 | Page 3 block equation | Latex Formula | formula | no-crop | formula | Rendered | `E = mc^2` |
 ```
 
 ### Image Status Enum
@@ -28,7 +23,7 @@ Defined in the Design Specification & Content Outline; each image carries an `Ac
 |--------|---------|-------------------|
 | **Pending** | Acquisition needed (`Acquire Via: ai` / `web`) or derivation needed (`Acquire Via: slice`); not yet attempted | Image Acquisition Phase (Step 5) consumes this; must not remain after Step 5 |
 | **Generated** | AI-generated file exists at expected path, or sliced element file exists at expected path | Reference from `../images/`; no on-slide credit needed. **Exception**: an `Illustration Sheet` row is only a slice source — it lives in §VIII but never in `spec_lock.md images`, so the Executor never places it |
-| **Sourced** | Web-sourced file exists at expected path | Reference from `../images/`; check `image_sources.json` for `license_tier` — if `attribution-required`, render an inline credit element on the slide (see [executor-base.md §6](./executor-base.md) and [image-searcher.md §7](./image-searcher.md) for the visual spec) |
+| **Sourced** | Web-sourced file exists at expected path | Reference from `../images/`; check `image_sources.json` for `license_tier` — if `attribution-required`, render an inline credit element on the slide (see [`executor-web-image.md`](./executor-web-image.md) §1 and [`image-searcher.md`](./image-searcher.md) §7 for the visual spec) |
 | **Rendered** | Deterministic formula PNG exists at expected path (`Acquire Via: formula`) | Reference from `../images/`; use `preserveAspectRatio="xMidYMid meet"` and do not crop |
 | **Needs-Manual** | Acquisition attempted once + one retry, failed; for `slice`, parent sheet is unavailable | Dashed placeholder unless user has manually supplied the file. For `slice` rows, place the parent sheet and rerun `slice_images.py`; do not hand-place individual element files |
 | **Existing** | User already has image (`Acquire Via: user`) | Place in `images/`, reference with `<image>` |
@@ -53,7 +48,7 @@ Defined in the Design Specification & Content Outline; each image carries an `Ac
    ├── Rendered formula → <image href="../images/formula_001.png" preserveAspectRatio="xMidYMid meet" .../>
    └── Placeholder / Needs-Manual without file → Dashed border + description text
 4. Preview: python3 -m http.server -d <project_path> 8000 → /svg_output/<filename>.svg
-5. Post-processing & Export → follow [`SKILL.md` Step 7](../SKILL.md)
+5. Post-processing & Export → follow [`generate-pptx.md`](../workflows/generate-pptx.md) Step 7
 ```
 
 > Keep external references in `svg_output/` during generation. `finalize_svg.py` auto-embeds images into the mandatory `svg_final/` visual preview; native PPTX export independently reads `svg_output/`.
@@ -130,12 +125,11 @@ python3 -m http.server -d <project_path> 8000
 
 ## Conversion Process
 
-Use the unified pipeline in [`SKILL.md` Step 7](../SKILL.md). `finalize_svg.py` remains mandatory and embeds image references into the self-contained `svg_final/` preview. The following PPTX command still reads `svg_output/` by default and converts it directly to native DrawingML; it does not consume `svg_final/` in the supported release route.
-
-```bash
-python3 scripts/finalize_svg.py <project_path>
-python3 scripts/svg_to_pptx.py <project_path>
-```
+Follow [`generate-pptx.md`](../workflows/generate-pptx.md) Step 7; it owns the
+serial post-processing and export commands. Its mandatory finalization step
+embeds image references into the self-contained `svg_final/` preview, while the
+supported native PPTX release still reads `svg_output/` and maps it directly to
+DrawingML.
 
 ### Standalone: align_embed_images.py (advanced)
 
@@ -176,7 +170,7 @@ project/
 
 ### Rounded Corner / Non-rectangular Image Cropping
 
-`clipPath` **on `<image>` elements** is conditionally allowed — authoritative constraints in [shared-standards.md §1.2](shared-standards.md); do not restate or relax here.
+`clipPath` **on `<image>` elements** is conditionally allowed — authoritative constraints in [`shared-standards-core.md`](./shared-standards-core.md) §1.2; do not restate or relax here.
 
 Fallback when `clipPath` doesn't fit: bake rounded corners into the source image (PNG with alpha) before embedding.
 

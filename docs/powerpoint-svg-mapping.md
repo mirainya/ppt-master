@@ -8,7 +8,7 @@
 
 This guide answers one question from the PowerPoint user's point of view: **for a PowerPoint feature, what project representation owns it, and what survives export or import?** PowerPoint semantics are therefore the primary index. SVG elements appear only as the implementation of a specific PowerPoint capability.
 
-This is a public capability and import-behavior map, not a second generated-SVG syntax specification and not a promise to convert arbitrary SVG or arbitrary OOXML. The canonical generated-authoring contract remains [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md); when generated syntax differs, that contract wins. PPTX import recovery modes and user-visible degradation belong to §11 here and to the [conversion command reference](../skills/ppt-master/scripts/docs/conversion.md), while the parser implementation remains the exact source of truth. A feature not listed here is not implicitly supported.
+This is a public capability and import-behavior map, not a second generated-SVG syntax specification and not a promise to convert arbitrary SVG or arbitrary OOXML. The canonical generated-authoring contract is the authority set selected through [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md); when generated syntax differs, the applicable module wins. PPTX import recovery modes and user-visible degradation belong to §11 here and to the [conversion command reference](../skills/ppt-master/scripts/docs/conversion.md), while the parser implementation remains the exact source of truth. A feature not listed here is not implicitly supported.
 
 The main route compiles **project-canonical SVG**, not general browser SVG:
 
@@ -45,10 +45,10 @@ Each row owns one PowerPoint capability. The mapping cardinality is not always o
 | Object position and size | Absolute SVG coordinates and element bounds | `a:xfrm` offsets and extents | `Native-normalized` through coordinate conversion | Values must be finite and use the registered coordinate grammar |
 | Z-order | SVG source order, back to front | PowerPoint shape-tree order | Reconstructed in shape-tree order | Do not rely on browser-only stacking behavior |
 | Rotation, scale, translation, and mirror | Supported SVG transform forms | DrawingML transform or normalized geometry | `Native-normalized`; matrices may be decomposed | Skew and shear outside the registered transform contract are not accepted |
-| Theme colors and fonts | Roles locked in `spec_lock.md`; canonical SVG uses the resolved values | Theme-aware tokens where an exact locked role can be retained; otherwise direct DrawingML values | `Native-stable` for registered roles | New pages must not invent unlocked colors, fonts, or text sizes |
+| Theme colors and fonts | Stable roles anchored in `spec_lock.md`; canonical SVG uses those roles plus contextual page values | Theme-aware tokens where an exact anchor role can be retained; otherwise direct DrawingML values | `Native-stable` for registered roles/direct values | Core roles and structural sizes stay stable; contextual colors and export-safe one-off fonts are allowed, while invalid/unavailable values fail |
 | PowerPoint-only package identity | `spec_lock.md` structure declarations and the package builder | Presentation, Master, Layout, relationship, and content-type registrations | Read back from package structure, not inferred from page appearance | Final-package read-back must match the declared roster |
 
-See [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md) for supported canvases and [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md) §4.1 for the normative root-`viewBox` contract.
+See [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md) for supported canvases and [`shared-standards-core.md` §4.1](../skills/ppt-master/references/shared-standards-core.md#41-semantic-svg-marker-contract) for the normative root-`viewBox` contract.
 
 ## 2. Master, Layout, background, and placeholder features
 
@@ -59,10 +59,10 @@ See [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md) for
 | Free-design deck structure | `pptx_structure.mode: flat`; page content remains slide-local | One clean project Master and one Blank Layout, with represented objects on slides | `Native-stable` package topology for the flat route | No authored Master/Layout/layer/placeholder metadata is allowed |
 | Template-backed deck structure | `pptx_structure.mode: structured` plus explicit Master/Layout/page assignments | Declared `p:sldMaster`, `p:sldLayout`, registrations, and slide parentage | `Native-stable` within the explicit structure contract | The exporter never guesses a Master, Layout, or placeholder topology |
 | Slide Master | Root Master identity plus atomic `data-pptx-layer="master"` objects; one validated compact authored-preset `<g>` counts as one semantic atom | Reusable Master part and picker identity | Create Template mirror may preserve validated source-package facts in a new workspace; authored modes create a new identity | Master atoms must be direct, stable, and identical across their slides; ordinary or expanded authored groups do not qualify |
-| Slide Layout | Root Layout identity plus atomic `data-pptx-layer="layout"` objects; one validated compact authored-preset `<g>` counts as one semantic atom | Reusable Layout part under one Master | Create Template mirror may preserve a validated source Layout in a new workspace; adaptive authoring may allocate a new Layout | Reuse a Layout key only when its fixed atoms and slot contract are identical; ordinary or expanded authored groups do not qualify |
+| Slide Layout | Root Layout identity plus atomic `data-pptx-layer="layout"` objects; one validated compact authored-preset `<g>` counts as one semantic atom | Reusable Layout part under one Master | Create Template mirror may preserve a validated source Layout in a new workspace; Strategist's adaptive plan may declare a new Layout | Reuse a Layout key only when its fixed atoms and slot contract are identical; ordinary or expanded authored groups do not qualify |
 | Imported inherited-shape visibility | Layered analysis records normalized source booleans; a materialized structured mirror writes exact lowercase root `data-pptx-show-inherited-shapes` and `data-pptx-show-master-shapes` | Declared source values written to `p:sld@showMasterSp` and `p:sldLayout@showMasterSp` | `Native-stable`: Slide false hides Layout and Master shapes; Layout false hides only Master shapes | Omission means true; every page using one Layout key must agree on the Layout value. Backgrounds, Slide-local objects, placeholder inheritance, parts, and parent relationships remain intact |
 | Strict template Layout | Selected prototype contract | Existing declared Layout topology is preserved | `Native-stable` when the page follows the prototype | Fixed Layout atoms and slot structure may not change |
-| Adaptive template Layout | Selected Master plus an explicit current or newly declared Layout | A new Layout identity may be created when reusable structure changes | `Native-stable` after the lock and page mapping are updated | Never mutate a reused Layout key silently |
+| Adaptive template Layout | Selected Master plus an explicit current or new Layout declared by Strategist | A declared new Layout identity is created when reusable structure changes | `Native-stable` after Strategist updates the plan/lock mapping and execution resumes | Construction-discovered changes return upstream; never mutate a reused Layout key downstream |
 | Slide background fill outside structured mode | First eligible full-canvas `<rect>`, direct or in a simple single-child group, with a registered solid, linear/radial gradient, or preset-pattern fill | Native slide `p:bg` | Fidelity follows the corresponding paint row below | Transform, filter, clip, rounding, visible stroke, or an unmapped fill prevents promotion |
 | Master/Layout/slide background fill in structured mode | One direct full-canvas solid `<rect>` in the declared structural layer | Native `p:bg` at Master, Layout, or slide scope | `Native-stable` | Explicit scoped background ownership is intentionally solid-only |
 | Gradient or pattern backdrop in structured mode | Ordinary gradient/pattern `<rect>` on its declared Master/Layout layer or as slide-local content | Editable shape on the owning part | Fidelity follows the corresponding paint row below | Structured export disables generic background promotion; do not use `data-pptx-layer="slide"` |
@@ -70,7 +70,7 @@ See [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md) for
 | Title placeholder | Structured slot group with one text carrier | Layout and slide `p:ph` of type `title` | `Native-stable` | Carrier count, bounds, type, and effective index must match the Layout contract |
 | Subtitle placeholder | Structured slot group with one text carrier | `p:ph` type `subTitle` | `Native-stable` | Same slot rules as title |
 | Body placeholder | Structured slot group with one text carrier | `p:ph` type `body` | `Native-stable` | A multiline carrier remains one text frame |
-| Imported mirror text-placeholder frame | Positive source `data-pptx-frame="x y width height"` on the slot's `<text>` carrier, separate from the slot's reusable bounds | The Slide carrier keeps that exact `a:xfrm`; text remains editable and source hard breaks remain explicit paragraphs | `Native-stable` within supported imported text | `data-pptx-placeholder-bounds` still owns the Layout default and may differ; authored standard/fidelity slots do not duplicate bounds into this frame |
+| Imported mirror text-placeholder frame | Positive source `data-pptx-frame="x y width height"` on the slot's `<text>` carrier, separate from the slot's reusable bounds | The Slide carrier keeps that exact `a:xfrm`; text remains editable and source hard breaks remain explicit paragraphs | `Native-stable` within supported imported text | `data-pptx-bounds` still owns the Layout default and may differ; authored standard/fidelity slots do not duplicate bounds into this frame |
 | Date, footer, and slide-number placeholders | Structured text slots | `p:ph` types `dt`, `ftr`, and `sldNum`, with matching Layout header/footer flags | `Native-stable` | Placeholder indices must be unique and legal |
 | Picture placeholder | Structured slot with one image or supported crop carrier | `p:ph` type `pic` | `Native-stable` within the picture contract | The slot must contain exactly one compatible direct carrier |
 | Chart or table placeholder | Structured slot with one matching native-object carrier | `p:ph` type `chart` or `tbl` | `Native-stable` only on native Chart/Table export | Requires valid JSON metadata and `--native-charts-and-tables` |
@@ -80,9 +80,9 @@ See [`canvas-formats.md`](../skills/ppt-master/references/canvas-formats.md) for
 | Page role such as cover/content/ending | Flat-route root `data-pptx-page-role` compiler hint | Routing/validation hint; not a native PowerPoint page type | No independent OOXML object | Structured pages use explicit Master/Layout identity instead |
 | Slide sections and custom shows | No SVG mapping | Not authored by the main generation route | `Direct preservation` where a source-preserving workflow owns them | Do not encode them as visual metadata |
 
-The exact structured metadata and slot grammar live in the [PPTX structure section of the normative standards](../skills/ppt-master/references/shared-standards.md#pptx-structure-routing).
+The exact structured metadata and slot grammar live in the [PPTX Structure Interface](../skills/ppt-master/references/pptx-structure-interface.md#1-pptx-structure-routing).
 
-Internal identifiers and PowerPoint display names are separate concerns: Master and Layout keys use the restricted project ASCII identifier grammar, while picker names may contain spaces. Every Layout definition also names its parent Master and one explicit prototype source. The normative standards own the exact row syntax.
+Internal identifiers and PowerPoint display names are separate concerns: Master and Layout keys use the restricted project ASCII identifier grammar, while picker names may contain spaces. Every Layout definition also names its parent Master and one explicit prototype source. The PPTX Structure Interface owns the exact row syntax.
 
 ## 3. PowerPoint shapes and drawing objects
 
@@ -108,7 +108,7 @@ Internal identifiers and PowerPoint display names are separate concerns: Master 
 Project-authored presets deliberately use a compact representation, while PPTX
 import keeps the expanded evidence needed for lossless round-trip decisions.
 The exact machine contract remains in
-[`shared-standards.md`](../skills/ppt-master/references/shared-standards.md), and
+[`shared-standards-core.md`](../skills/ppt-master/references/shared-standards-core.md), and
 preset selection and authoring behavior are documented in
 [`native-shape-authoring.md`](../skills/ppt-master/references/native-shape-authoring.md).
 
@@ -120,15 +120,15 @@ preset selection and authoring behavior are documented in
 | Mixed formatting within a line | Non-positioned `<tspan>` runs | DrawingML runs in one text frame | `Native-normalized`; registered run formatting remains editable | Positioning that changes frame geometry may split the result |
 | Multiple paragraphs | Mergeable text/tspan structure | Multiple `a:p` paragraphs in one text frame | `Native-normalized` | Strict independently positioned lines may remain separate text boxes |
 | Significant text whitespace | Exact `xml:space="default"` or `xml:space="preserve"` on `<text>`/`<tspan>` | Normalized or preserved U+0020 text in editable DrawingML runs | `Native-normalized`; inline run ownership is retained | Uses the project Chromium/SVG2 contract: LF/TAB become spaces, `default` collapses across runs, `preserve` retains them, and Unicode spacing characters remain literal; CSS `white-space` and legacy SVG 1.1 newline deletion are outside the mapping |
-| Font family | Canonical `font-family` resolved against the project lock | Direct typeface or registered theme font | `Native-stable` within installed/font-substitution limits | Unlocked or unavailable fonts are reported by validation |
+| Font family | Canonical `font-family` resolved as a structural lock role or contextual export-safe choice | Direct typeface or registered theme font | `Native-stable` within installed/font-substitution limits | Unavailable/unsafe fonts are reported; a contextual safe family is informational, not a lock failure |
 | Font size | Finite unitless SVG pixels, for example `font-size="24"` | DrawingML hundredths of a point; `1 px = 0.75 pt` | `Native-stable` after unit conversion | Generated authoring uses only unitless px; registered legacy units are compatible input and warn, while unknown units error; DrawingML minimum is 1 pt |
-| Font weight | Registered `font-weight` on `<text>`/`<tspan>` | DrawingML regular/bold run switch | `Native-normalized`; numeric weights collapse to the DrawingML boolean boundary | The exact value grammar and aliases belong to [`shared-standards.md` §6.7](../skills/ppt-master/references/shared-standards.md#67-advanced-text-treatments) |
-| Italic, underline, and strike | Registered `font-style` / `text-decoration` on `<text>`/`<tspan>` | DrawingML italic, underline, and strike run properties | `Native-stable` for registered tokens | Unknown tokens are rejected; the exact grammar belongs to [`shared-standards.md` §6.7](../skills/ppt-master/references/shared-standards.md#67-advanced-text-treatments) |
+| Font weight | Registered `font-weight` on `<text>`/`<tspan>` | DrawingML regular/bold run switch | `Native-normalized`; numeric weights collapse to the DrawingML boolean boundary | The exact value grammar and aliases belong to [`svg-effects.md` §6.7](../skills/ppt-master/references/svg-effects.md#67-advanced-text-treatments) |
+| Italic, underline, and strike | Registered `font-style` / `text-decoration` on `<text>`/`<tspan>` | DrawingML italic, underline, and strike run properties | `Native-stable` for registered tokens | Unknown tokens are rejected; the exact grammar belongs to [`svg-effects.md` §6.7](../skills/ppt-master/references/svg-effects.md#67-advanced-text-treatments) |
 | Text fill and transparency | Canonical fill plus run alpha | DrawingML run fill and alpha | `Native-normalized` | Use the semantic alpha channel, not an unregistered CSS effect |
 | Text outline | Registered stroke on text | DrawingML run outline | `Native-normalized` | Review when outline carries fine visual meaning |
-| Text alignment | Registered `text-anchor` and paragraph semantics | Paragraph alignment plus normalized text-frame position | `Native-normalized` | Run-level anchoring and browser baseline heuristics are unsupported; exact placement belongs to [`shared-standards.md` §6.7](../skills/ppt-master/references/shared-standards.md#67-advanced-text-treatments) |
+| Text alignment | Registered `text-anchor` and paragraph semantics | Paragraph alignment plus normalized text-frame position | `Native-normalized` | Run-level anchoring and browser baseline heuristics are unsupported; exact placement belongs to [`svg-effects.md` §6.7](../skills/ppt-master/references/svg-effects.md#67-advanced-text-treatments) |
 | Vertical text-frame alignment | No canonical generated-SVG control; generated text boxes use top anchoring | Top-anchored DrawingML text body | Imported vertical text may be normalized, but the main route does not expose a general authoring control | Do not infer vertical alignment from SVG baseline or browser layout behavior |
-| Character spacing | Registered `letter-spacing` | DrawingML character spacing | `Native-normalized` | Unsupported CSS typography, out-of-range DrawingML spacing, and negative tracking that collapses a generated run advance or text-frame extent to a non-positive value are rejected under [`shared-standards.md` §6.7](../skills/ppt-master/references/shared-standards.md#67-advanced-text-treatments) |
+| Character spacing | Registered `letter-spacing` | DrawingML character spacing | `Native-normalized` | Unsupported CSS typography, out-of-range DrawingML spacing, and negative tracking that collapses a generated run advance or text-frame extent to a non-positive value are rejected under [`svg-effects.md` §6.7](../skills/ppt-master/references/svg-effects.md#67-advanced-text-treatments) |
 | Bulleted paragraph | Recognized leading bullet form | Native DrawingML bullet | `Native-normalized` | Only the registered bullet grammar is promoted |
 | Rotated text | Supported transform on the text object | Rotated text shape | `Native-normalized` | Skewed text and browser-only transforms are unsupported |
 | Text shadow or glow | Supported filter/effect contract | One native outer shadow or glow | `Approximate` | One supported effect graph only; review material effects |
@@ -153,7 +153,7 @@ preset selection and authoring behavior are documented in
 | PowerPoint feature | Project representation | PPTX result | Import and fidelity | Validation boundary |
 |---|---|---|---|---|
 | No fill | `fill="none"` | `a:noFill` | `Native-stable` | Use lowercase canonical spelling in generated SVG |
-| Solid fill | Locked canonical `fill="#RRGGBB"` | `a:solidFill`, with a theme token when the locked role is exactly reusable | `Native-stable` | Compatible color spellings may warn; malformed or unlocked generated values fail |
+| Solid fill | Canonical `fill="#RRGGBB"`, either a named lock anchor or contextual page paint | `a:solidFill`, with a theme token when an anchor role is exactly reusable | `Native-stable` | Compatible spellings may warn; malformed colors fail, while valid contextual colors are informational |
 | Fill transparency | Opaque fill plus `fill-opacity` | Native alpha | `Native-stable` | Generated values are finite unitless numbers from 0 to 1 |
 | Linear gradient fill | Registered `<linearGradient>` in `<defs>` | Native `a:gradFill` | `Native-normalized` | Stops, coordinates, transforms, and references must follow the closed contract |
 | Radial gradient fill | Registered `<radialGradient>` | Centered circular DrawingML gradient | `Approximate` | Review focal/radius-sensitive designs |
@@ -195,12 +195,12 @@ Imported chart groups classify their visible fallback with `data-pptx-fallback-k
 | Visually drawn chart | Ordinary SVG geometry and text | Independent editable PowerPoint shapes | Fidelity follows each component row | It has no “Edit Data” workbook |
 | PowerPoint-native classic chart | One `<g data-pptx-replace-with="chart">` with registered JSON data in `<metadata type="application/json">` and a visible fallback | `p:graphicFrame`, classic chart part, and embedded workbook | Supported imports reconstruct a fallback plus replacement metadata | Chart type and data must match the closed schema; requires `--native-charts-and-tables` |
 | Native ChartEx chart | Same marker interface with a supported ChartEx family | `cx:chart` part and embedded workbook | Supported families can reconstruct semantically | Only the registered family/field combinations are accepted |
-| Chart title, legend, axes, labels, and series formatting | Registered native-chart metadata | Native chart properties | `Native-normalized` | Exact fields and supported families remain normative in `shared-standards.md` |
+| Chart title, legend, axes, labels, and series formatting | Registered native-chart metadata | Native chart properties | `Native-normalized` | Exact fields and supported families remain normative in `native-data-interface.md` |
 | Chart caption, source, or footnote | Ordinary companion SVG text outside the replacement marker | Editable slide text boxes beside the chart | `Native-stable` as text | Do not hide slide prose inside chart JSON |
 | Edited SVG fallback with stale replacement metadata | Updated visible SVG plus stale hash | Default export keeps the visible SVG; native replacement fails | Explicit safety behavior | The compiler never discards a newer visual edit silently |
 | Unsupported 3D or deferred chart family | SVG-drawn chart, baked asset, or direct source preservation | No guessed native chart | Fallback / `Direct preservation` | Unsupported aliases must fail native validation |
 
-The exhaustive chart/table schemas and supported family list intentionally remain in the [normative replacement contract](../skills/ppt-master/references/shared-standards.md#powerpoint-native-chart--table-replacement-markers-opt-in).
+The exhaustive chart/table schemas and supported family list intentionally remain in the [Native Data Interface replacement contract](../skills/ppt-master/references/native-data-interface.md#2-powerpoint-native-chart--table-replacement-markers-opt-in).
 
 ## 9. PowerPoint playback and package features
 
@@ -281,7 +281,7 @@ A generated-SVG warning is not permission to guess. It is reserved for a determi
 Treat a mapping change as a compiler change, not as a permissive SVG parser tweak:
 
 1. Name the PowerPoint capability and its intended editable DrawingML result.
-2. Define one canonical project-SVG or sidecar representation in [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md).
+2. Define one canonical project-SVG or sidecar representation in the applicable authority module selected by [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md).
 3. State accepted compatible input separately from generated authoring.
 4. Implement export, and implement import only when semantic reconstruction is supported.
 5. Add checker classification: error for invalid/ambiguous input, warning only for deterministic compatible or approximate input.
@@ -293,4 +293,4 @@ Implementation entry points:
 - Export: [`svg_to_pptx.py`](../skills/ppt-master/scripts/svg_to_pptx.py) and `scripts/svg_to_pptx/`
 - Import: [`pptx_to_svg.py`](../skills/ppt-master/scripts/pptx_to_svg.py) and `scripts/pptx_to_svg/`
 - Validation: [`svg_quality_checker.py`](../skills/ppt-master/scripts/svg_quality_checker.py)
-- Canonical contract: [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md)
+- Authority router: [`shared-standards.md`](../skills/ppt-master/references/shared-standards.md)
