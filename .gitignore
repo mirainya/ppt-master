@@ -197,3 +197,7 @@ projects/*
 skills/ppt-master/templates/brands/*/exports/
 skills/ppt-master/templates/decks/*/exports/
 skills/ppt-master/templates/layouts/*/exports/
+
+# Local deployment docs with real infra values (IP/domain) — never commit
+deploy/DEPLOYMENT.md
+docs/zh/org-integration.md
