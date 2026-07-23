@@ -91,6 +91,17 @@ class AgentRunner:
             "sandbox_workspace_write.network_access=false",
             'shell_environment_policy.inherit="core"',
         ]
+        # Codex ignores the OPENAI_BASE_URL env var for its built-in provider, so a
+        # relay/base URL only takes effect when declared as an explicit model provider.
+        # Without this, Codex always hits the hardcoded api.openai.com endpoint.
+        if self.runtime_config.codex_base_url:
+            overrides += [
+                'model_provider="relay"',
+                'model_providers.relay.name="relay"',
+                f'model_providers.relay.base_url="{self.runtime_config.codex_base_url}"',
+                'model_providers.relay.env_key="OPENAI_API_KEY"',
+                'model_providers.relay.wire_api="responses"',
+            ]
         if os.name == "nt":
             overrides.append('windows.sandbox="unelevated"')
         codex = AsyncCodex(
