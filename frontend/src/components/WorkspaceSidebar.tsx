@@ -48,7 +48,7 @@ export function WorkspaceSidebar({
         <div className="brand-mark">
           <Presentation size={18} />
         </div>
-        <strong>PPT Master</strong>
+        <strong>叙卷</strong>
         <button
           className="icon-button sidebar-close"
           onClick={onClose}

@@ -69,7 +69,7 @@ export function LoginPage({ theme, onTheme }: LoginPageProps) {
           <div className="login-hero-mark">
             <Presentation size={26} />
           </div>
-          <h2>PPT Master</h2>
+          <h2>叙卷</h2>
           <p>把文档、网页与想法，一句话变成可直接编辑的原生 PPT。</p>
           <ul className="login-hero-points">
             <li>多角色协作生成，真实 PowerPoint 图形</li>
