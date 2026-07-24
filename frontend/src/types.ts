@@ -141,6 +141,17 @@ export interface RuntimeConfigUpdate {
   image_concurrency: number | null;
 }
 
+export interface ImageCapability {
+  code: string;
+  label: string;
+}
+
+export interface ImageCapabilitiesResponse {
+  available: boolean;
+  error: string | null;
+  models: ImageCapability[];
+}
+
 export const terminalStatuses = new Set<JobStatus>([
   "succeeded",
   "failed",

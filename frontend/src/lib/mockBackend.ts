@@ -330,6 +330,15 @@ function route(method: string, path: string): Response {
   // Admin
   if (path === "/v1/admin/users" && method === "GET") return json(adminUsers);
   if (path === "/v1/admin/runtime-config") return json(runtimeConfig);
+  if (path === "/v1/admin/image-capabilities")
+    return json({
+      available: true,
+      error: null,
+      models: [
+        { code: "gpt_image2", label: "GPT 画图" },
+        { code: "doubao_img", label: "豆包画图" },
+      ],
+    });
 
   // Billing / pricing
   if (path === "/v1/admin/billing-config") return json(pricing);

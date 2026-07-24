@@ -6,6 +6,7 @@ import type {
   Confirmation,
   CreatedApiKey,
   CreatedOrgApiKey,
+  ImageCapabilitiesResponse,
   Job,
   JobEvent,
   JobMessage,
@@ -144,6 +145,12 @@ export class ApiClient {
       method: "PUT",
       body: JSON.stringify(config),
     });
+  }
+
+  getImageCapabilities(): Promise<ImageCapabilitiesResponse> {
+    return this.request<ImageCapabilitiesResponse>(
+      "/v1/admin/image-capabilities",
+    );
   }
 
   getPricing(): Promise<Pricing> {
