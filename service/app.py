@@ -278,6 +278,27 @@ async def _require_job(
     return job
 
 
+async def _require_job_readonly(
+    request: Request,
+    job_id: UUID,
+    user: AuthenticatedUser,
+) -> dict:
+    """Fetch a job for read-only access.
+
+    Admins may read any user's job (preview, download, messages); non-admins
+    are limited to their own jobs. Mutating endpoints keep using _require_job.
+    """
+    if user.is_admin:
+        job = await _repository(request).get_job(job_id)
+    else:
+        job = await _repository(request).get_job_for_user(
+            job_id, user.id, include_unowned=False
+        )
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
 async def _reject_if_purged(request: Request, job_id: UUID) -> None:
     """Return 410 when a task's files were intentionally cleaned up."""
     job = await _repository(request).get_job(job_id)
@@ -646,7 +667,7 @@ async def list_jobs(
     response_model=JobRead,
 )
 async def get_job(request: Request, job_id: UUID, user: CurrentUser) -> dict:
-    return await _require_job(request, job_id, user)
+    return await _require_job_readonly(request, job_id, user)
 
 
 @app.get(
@@ -658,7 +679,7 @@ async def list_messages(
     job_id: UUID,
     user: CurrentUser,
 ) -> list[dict]:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
     return await _repository(request).list_messages(job_id)
 
 
@@ -671,7 +692,7 @@ async def stream_events(
     user: CurrentUser,
     after: int = 0,
 ) -> StreamingResponse:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
 
     async def event_stream() -> AsyncIterator[str]:
         last_event_id = max(after, 0)
@@ -707,7 +728,7 @@ async def get_confirmation(
     job_id: UUID,
     user: CurrentUser,
 ) -> dict:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
     confirmation = await _repository(request).get_confirmation(job_id)
     if confirmation is None:
         raise HTTPException(status_code=404, detail="confirmation is not ready")
@@ -898,7 +919,7 @@ async def list_artifacts(
     job_id: UUID,
     user: CurrentUser,
 ) -> list[dict]:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
     repository = _repository(request)
     existing = await repository.list_artifacts(job_id)
     live_previews = request.app.state.storage.discover_live_previews(job_id)
@@ -933,7 +954,7 @@ async def download_artifact(
     artifact_id: UUID,
     user: CurrentUser,
 ) -> FileResponse:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
     await _reject_if_purged(request, job_id)
     artifact = await _repository(request).get_artifact(job_id, artifact_id)
     if artifact is None:
@@ -958,7 +979,7 @@ async def view_artifact(
     artifact_id: UUID,
     user: CurrentUser,
 ) -> FileResponse:
-    await _require_job(request, job_id, user)
+    await _require_job_readonly(request, job_id, user)
     await _reject_if_purged(request, job_id)
     live_preview = next(
         (
@@ -998,7 +1019,7 @@ async def view_artifact(
 @app.get("/v1/jobs/{job_id}/usage")
 async def job_usage(request: Request, job_id: UUID, user: CurrentUser) -> dict:
     """Layer-2 usage receipt for one job, for the enterprise to bill its end-user."""
-    job = await _require_job(request, job_id, user)
+    job = await _require_job_readonly(request, job_id, user)
     usage = await _repository(request).get_job_usage(job_id)
     end_user_id = await request.app.state.auth_repository.external_id_for_user(
         job["owner_id"]
