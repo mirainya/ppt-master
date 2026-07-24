@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, AsyncIterator
@@ -65,6 +67,7 @@ from service.schemas import (
     JobMessageSubmit,
     JobMessageRead,
     CreditTopup,
+    ImageCapabilitiesRead,
     JobRead,
     JobRoute,
     JobStatus,
@@ -1387,6 +1390,31 @@ async def admin_get_runtime_config(
 ) -> dict:
     config = await request.app.state.runtime_config_repository.get()
     return _runtime_config_read(config)
+
+
+@app.get("/v1/admin/image-capabilities", response_model=ImageCapabilitiesRead)
+async def admin_get_image_capabilities(request: Request, admin: AdminUser) -> dict:
+    """List selectable image models from the relay's /capabilities endpoint.
+
+    Uses the runtime-config image credentials (never .env). Any failure degrades
+    to available:false so the admin panel falls back to manual model entry.
+    """
+    config = await request.app.state.runtime_config_repository.get()
+    base = (config.image_base_url or "").rstrip("/")
+    key = config.image_api_key or ""
+    if not base or not key:
+        return {"available": False, "error": "生图渠道未配置", "models": []}
+    url = base + "/capabilities"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        return {"available": False, "error": f"渠道返回 {exc.code}", "models": []}
+    except Exception:  # noqa: BLE001 — network/JSON errors all degrade the same way
+        return {"available": False, "error": "无法连接生图渠道", "models": []}
+    models = _filter_image_capabilities(payload)
+    return {"available": True, "error": None, "models": models}
 
 
 @app.put("/v1/admin/runtime-config", response_model=RuntimeConfigRead)
