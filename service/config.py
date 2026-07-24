@@ -21,6 +21,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _non_negative_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater")
+    return value
+
+
 def _optional_positive_int(name: str) -> int | None:
     raw_value = os.environ.get(name, "").strip().lower()
     if raw_value in {"", "0", "auto"}:
@@ -59,6 +70,7 @@ class Settings:
     session_cookie_secure: bool
     session_cookie_samesite: str
     session_days: int
+    job_retention_days: int
     runtime_root: Path
     queue_name: str
     job_lease_seconds: int
@@ -91,6 +103,7 @@ class Settings:
             session_cookie_secure=_boolean("PPT_SESSION_COOKIE_SECURE", False),
             session_cookie_samesite=_samesite("PPT_SESSION_COOKIE_SAMESITE", "lax"),
             session_days=_positive_int("PPT_SESSION_DAYS", 30),
+            job_retention_days=_non_negative_int("PPT_JOB_RETENTION_DAYS", 30),
             runtime_root=Path(
                 os.environ.get("PPT_RUNTIME_ROOT", repo_root / "runtime" / "jobs")
             ).resolve(),
