@@ -1,7 +1,7 @@
 import { type FormEvent, useCallback, useState } from "react";
 
 import type { ApiClient } from "../api";
-import type { RuntimeConfig, RuntimeConfigUpdate } from "../types";
+import type { ImageCapability, RuntimeConfig, RuntimeConfigUpdate } from "../types";
 
 /** Loads and saves service-wide runtime config (Codex + image provider). */
 export function useRuntimeConfig(apiClient: ApiClient) {
@@ -13,6 +13,7 @@ export function useRuntimeConfig(apiClient: ApiClient) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [imageModels, setImageModels] = useState<ImageCapability[]>([]);
 
   const load = useCallback(async () => {
     setConfig(null);
@@ -25,6 +26,12 @@ export function useRuntimeConfig(apiClient: ApiClient) {
     setClearImageKey(false);
     try {
       setConfig(await apiClient.getRuntimeConfig());
+      try {
+        const caps = await apiClient.getImageCapabilities();
+        setImageModels(caps.available ? caps.models : []);
+      } catch {
+        setImageModels([]); // capabilities are optional; panel falls back to manual entry
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "配置读取失败");
     } finally {
@@ -78,6 +85,7 @@ export function useRuntimeConfig(apiClient: ApiClient) {
 
   return {
     config,
+    imageModels,
     setConfig,
     codexKeyDraft,
     setCodexKeyDraft,
