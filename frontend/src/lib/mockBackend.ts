@@ -39,6 +39,7 @@ const jobs: Job[] = [
     error: null,
     created_at: iso(3_600_000),
     updated_at: iso(3_000_000),
+    files_purged_at: null,
   },
   {
     id: "job-2",
@@ -52,6 +53,7 @@ const jobs: Job[] = [
     error: null,
     created_at: iso(600_000),
     updated_at: iso(120_000),
+    files_purged_at: null,
   },
   {
     id: "job-3",
@@ -65,6 +67,7 @@ const jobs: Job[] = [
     error: null,
     created_at: iso(300_000),
     updated_at: iso(60_000),
+    files_purged_at: null,
   },
 ];
 

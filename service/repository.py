@@ -174,10 +174,11 @@ class JobRepository:
         """Stamp files_purged_at once the on-disk files are gone."""
         record = await self.database.require_pool().fetchrow(
             """
-            UPDATE jobs
+            UPDATE jobs AS job
             SET files_purged_at = CURRENT_TIMESTAMP
-            WHERE id = $1
-            RETURNING *
+            WHERE job.id = $1
+            RETURNING job.*,
+                (SELECT username FROM users WHERE id = job.owner_id) AS owner_username
             """,
             job_id,
         )
