@@ -167,6 +167,16 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
               }
             />
           </label>
+          <label>
+            <span>尺寸</span>
+            <input
+              value={config.image_size}
+              placeholder="2048x1536"
+              onChange={(event) =>
+                rc.setConfig({ ...config, image_size: event.target.value })
+              }
+            />
+          </label>
           <label className="settings-field-wide">
             <span>模型（可点选或手输，逗号分隔为降级链）</span>
             <input
@@ -196,16 +206,6 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
                 ))}
               </div>
             )}
-          </label>
-          <label>
-            <span>尺寸</span>
-            <input
-              value={config.image_size}
-              placeholder="2048x1536"
-              onChange={(event) =>
-                rc.setConfig({ ...config, image_size: event.target.value })
-              }
-            />
           </label>
           <SecretField
             label="API 密钥"
