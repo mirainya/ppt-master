@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -152,6 +153,47 @@ class JobRepository:
             owner_id,
             include_unowned,
             max(1, min(limit, 100)),
+        )
+        return [dict(record) for record in records]
+
+    async def list_all_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List every task across all owners, newest first, with owner username."""
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT job.*, account.username AS owner_username
+            FROM jobs AS job
+            LEFT JOIN users AS account ON account.id = job.owner_id
+            ORDER BY job.updated_at DESC
+            LIMIT $1
+            """,
+            max(1, min(limit, 200)),
+        )
+        return [dict(record) for record in records]
+
+    async def mark_job_purged(self, job_id: UUID) -> dict[str, Any] | None:
+        """Stamp files_purged_at once the on-disk files are gone."""
+        record = await self.database.require_pool().fetchrow(
+            """
+            UPDATE jobs
+            SET files_purged_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING *
+            """,
+            job_id,
+        )
+        return dict(record) if record else None
+
+    async def list_purgeable_jobs(self, cutoff: datetime) -> list[dict[str, Any]]:
+        """Terminal tasks last updated before cutoff that still hold files."""
+        records = await self.database.require_pool().fetch(
+            """
+            SELECT * FROM jobs
+            WHERE status IN ('succeeded', 'failed', 'cancelled')
+              AND updated_at < $1
+              AND files_purged_at IS NULL
+            ORDER BY updated_at ASC
+            """,
+            cutoff,
         )
         return [dict(record) for record in records]
 
