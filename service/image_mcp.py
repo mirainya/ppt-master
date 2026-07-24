@@ -56,6 +56,9 @@ def _model_list() -> list[str]:
     return models
 
 
+LAST_MODEL_RATE_LIMIT_RETRIES = 2
+
+
 def _run_with_fallback(
     payload: dict[str, Any],
     backend: Any,
@@ -63,18 +66,24 @@ def _run_with_fallback(
     models: list[str],
     concurrency: int,
     output_dir: str,
+    manifest_path: str | None = None,
+    save_fn: Any = None,
 ) -> tuple[int, int, dict[str, str]]:
     """Try each model in order; any error on an item falls through to the next model.
 
-    max_retries=0 means rate-limit/5xx/timeout all surface immediately so the
-    outer model loop switches without waiting. Only items still Failed after the
-    last model count as failures. Returns (ok, failed, {filename: winning_model}).
+    Middle models use max_retries=0 so 429/5xx/timeout surface immediately and the
+    outer loop switches without waiting. The last model in the chain (or a single-
+    model chain) has nowhere to fall back to, so it gets a bounded retry instead of
+    hard-failing on a transient error. Only items still Failed after the last model
+    count as failures. Item status is persisted after each completion via save_fn so
+    a later rerun does not regenerate already-Generated items. Returns
+    (ok, failed, {filename: winning_model}).
     """
     items = payload["items"]
     lock = threading.Lock()
     model_trace: dict[str, str] = {}
 
-    def _one(idx: int, model: str):
+    def _one(idx: int, model: str, max_retries: int):
         item = items[idx]
         try:
             backend.generate(
@@ -84,22 +93,26 @@ def _run_with_fallback(
                 output_dir=output_dir,
                 filename=Path(item["filename"]).stem,
                 model=model,
-                max_retries=0,
+                max_retries=max_retries,
             )
             return idx, None
         except Exception as exc:  # noqa: BLE001 — backend raises arbitrary types
             return idx, exc
 
-    for model in models:
+    last_index = len(models) - 1
+    for model_index, model in enumerate(models):
         pending = [
             i for i, it in enumerate(items)
             if it["status"] in {"Pending", "Failed"}
         ]
         if not pending:
             break
+        max_retries = (
+            LAST_MODEL_RATE_LIMIT_RETRIES if model_index == last_index else 0
+        )
         batch = max(1, min(concurrency, len(pending)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=batch) as ex:
-            futures = [ex.submit(_one, i, model) for i in pending]
+            futures = [ex.submit(_one, i, model, max_retries) for i in pending]
             for fut in concurrent.futures.as_completed(futures):
                 idx, exc = fut.result()
                 item = items[idx]
@@ -107,11 +120,14 @@ def _run_with_fallback(
                     if exc is None:
                         item["status"] = "Generated"
                         item.pop("last_error", None)
+                        item.pop("last_model", None)
                         model_trace[item["filename"]] = model
                     else:
                         item["status"] = "Failed"
                         item["last_error"] = str(exc)[:500]
                         item["last_model"] = model
+                    if save_fn is not None and manifest_path is not None:
+                        save_fn(manifest_path, payload)
 
     ok = sum(1 for it in items if it["status"] == "Generated")
     failed = sum(1 for it in items if it["status"] == "Failed")
@@ -321,6 +337,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
             "OPENAI_SIZE_OVERRIDE": image_size,
         }
     )
+    model_trace: dict[str, str] = {}
     try:
         # MCP stdio reserves stdout for JSON-RPC; provider progress belongs on stderr.
         with redirect_stdout(sys.stderr):
@@ -332,6 +349,8 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
                 models=models,
                 concurrency=concurrency,
                 output_dir=str(manifest.parent),
+                manifest_path=str(manifest),
+                save_fn=image_gen.save_manifest,
             )
             image_gen.render_manifest_md_to_file(str(manifest), payload)
         if failed:
@@ -341,7 +360,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
             **audit_details,
             "cumulative_total": prior_total + generated_this_call(),
         }
-        _write_audit("failed", error=str(exc)[:500], **failed_details)
+        _write_audit("failed", error=str(exc)[:500], model_trace=model_trace, **failed_details)
         raise
 
     generated_files = []

@@ -37,10 +37,12 @@ class _FakeBackend:
         self.failing_models = set(failing_models)
         self.exc = exc
         self.calls = []
+        self.retries = []
 
     def generate(self, *, prompt, aspect_ratio, image_size, output_dir,
                  filename, model, max_retries):
         self.calls.append((filename, model))
+        self.retries.append((model, max_retries))
         if model in self.failing_models:
             raise self.exc
         return f"{output_dir}/{filename}.png"
@@ -79,3 +81,32 @@ def test_fallback_primary_success_skips_backups(tmp_path):
     )
     assert ok == 1 and failed == 0
     assert all(model == "m1" for _, model in backend.calls)
+
+
+def test_fallback_persists_after_each_item(tmp_path):
+    payload = _manifest("a.png", "b.png")
+    backend = _FakeBackend(failing_models=[], exc=RuntimeError("x"))
+    saved = []
+
+    def fake_save(path, data):
+        saved.append((path, [it["status"] for it in data["items"]]))
+
+    image_mcp._run_with_fallback(
+        payload, backend, models=["m1"], concurrency=1,
+        output_dir=str(tmp_path), manifest_path="mf.json", save_fn=fake_save,
+    )
+    assert len(saved) == 2  # once per item
+    assert all(p == "mf.json" for p, _ in saved)
+
+
+def test_last_model_bounded_retry_middle_zero(tmp_path):
+    payload = _manifest("a.png")
+    backend = _FakeBackend(failing_models=["m1", "m2"], exc=RuntimeError("503"))
+    image_mcp._run_with_fallback(
+        payload, backend, models=["m1", "m2", "m3"], concurrency=1,
+        output_dir=str(tmp_path),
+    )
+    by_model = {model: mr for model, mr in backend.retries}
+    assert by_model["m1"] == 0   # middle → 0 retry, switch immediately
+    assert by_model["m2"] == 0
+    assert by_model["m3"] == 2   # last model → bounded retry
