@@ -453,6 +453,18 @@ class JobStorage:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def purge_job_files(self, job_id: UUID) -> bool:
+        """Delete one task's whole on-disk directory. Idempotent.
+
+        Returns True if a directory was removed, False if it did not exist.
+        The job_dir() call re-validates the path stays under root.
+        """
+        job_dir = self.job_dir(job_id)
+        if not job_dir.exists():
+            return False
+        shutil.rmtree(job_dir)
+        return True
+
     @staticmethod
     def _require_child(path: Path, parent: Path) -> None:
         try:
