@@ -1,4 +1,5 @@
 import type {
+  AdminJob,
   AdminUser,
   ApiKey,
   Artifact,
@@ -208,6 +209,16 @@ export class ApiClient {
 
   listJobs(): Promise<Job[]> {
     return this.request<Job[]>("/v1/jobs?limit=50");
+  }
+
+  listAllJobs(limit = 50): Promise<AdminJob[]> {
+    return this.request<AdminJob[]>(`/v1/admin/jobs?limit=${limit}`);
+  }
+
+  purgeJob(jobId: string): Promise<AdminJob> {
+    return this.request<AdminJob>(`/v1/admin/jobs/${jobId}/purge`, {
+      method: "POST",
+    });
   }
 
   getJob(jobId: string): Promise<Job> {

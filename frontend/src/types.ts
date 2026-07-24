@@ -37,6 +37,11 @@ export interface Job {
   error: { code?: string; message?: string } | null;
   created_at: string;
   updated_at: string;
+  files_purged_at: string | null;
+}
+
+export interface AdminJob extends Job {
+  owner_username: string | null;
 }
 
 export interface JobEvent {
