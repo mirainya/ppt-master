@@ -257,7 +257,7 @@ async def _start_browser_session(
         max_age=request.app.state.settings.session_days * 86_400,
         httponly=True,
         secure=request.app.state.settings.session_cookie_secure,
-        samesite="lax",
+        samesite=request.app.state.settings.session_cookie_samesite,
         path="/",
     )
 
@@ -455,7 +455,13 @@ async def logout(request: Request, response: Response) -> MessageRead:
         await request.app.state.auth_repository.delete_session(
             hash_token(session_token)
         )
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(
+        SESSION_COOKIE,
+        path="/",
+        httponly=True,
+        secure=request.app.state.settings.session_cookie_secure,
+        samesite=request.app.state.settings.session_cookie_samesite,
+    )
     return MessageRead(message="signed out")
 
 

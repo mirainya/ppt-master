@@ -43,6 +43,13 @@ def _boolean(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _samesite(name: str, default: str) -> str:
+    raw_value = os.environ.get(name, default).strip().lower()
+    if raw_value not in {"lax", "strict", "none"}:
+        raise ValueError(f"{name} must be one of lax, strict, none")
+    return raw_value
+
+
 @dataclass
 class Settings:
     """Runtime settings loaded from environment variables."""
@@ -50,6 +57,7 @@ class Settings:
     database_url: str
     redis_url: str
     session_cookie_secure: bool
+    session_cookie_samesite: str
     session_days: int
     runtime_root: Path
     queue_name: str
@@ -81,6 +89,7 @@ class Settings:
             ),
             redis_url=os.environ.get("PPT_REDIS_URL", "redis://127.0.0.1:6379/0"),
             session_cookie_secure=_boolean("PPT_SESSION_COOKIE_SECURE", False),
+            session_cookie_samesite=_samesite("PPT_SESSION_COOKIE_SAMESITE", "lax"),
             session_days=_positive_int("PPT_SESSION_DAYS", 30),
             runtime_root=Path(
                 os.environ.get("PPT_RUNTIME_ROOT", repo_root / "runtime" / "jobs")
@@ -108,6 +117,12 @@ class Settings:
         if self.job_heartbeat_seconds >= self.job_lease_seconds:
             raise RuntimeError(
                 "PPT_JOB_HEARTBEAT_SECONDS must be less than PPT_JOB_LEASE_SECONDS"
+            )
+        if self.session_cookie_samesite == "none" and not self.session_cookie_secure:
+            raise RuntimeError(
+                "PPT_SESSION_COOKIE_SECURE must be true when "
+                "PPT_SESSION_COOKIE_SAMESITE=none (browsers reject insecure "
+                "SameSite=None cookies)"
             )
         if self.image_api_key and not (self.image_base_url and self.image_model):
             raise RuntimeError(
