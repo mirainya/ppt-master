@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures  # Must import early, before service/queue.py shadows stdlib queue
 import json
 import os
 import sys
+import threading
 from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from importlib import import_module
@@ -52,6 +54,68 @@ def _model_list() -> list[str]:
     if not models:
         raise RuntimeError("Image generation is not configured: PPT_IMAGE_MODEL is empty")
     return models
+
+
+def _run_with_fallback(
+    payload: dict[str, Any],
+    backend: Any,
+    *,
+    models: list[str],
+    concurrency: int,
+    output_dir: str,
+) -> tuple[int, int, dict[str, str]]:
+    """Try each model in order; any error on an item falls through to the next model.
+
+    max_retries=0 means rate-limit/5xx/timeout all surface immediately so the
+    outer model loop switches without waiting. Only items still Failed after the
+    last model count as failures. Returns (ok, failed, {filename: winning_model}).
+    """
+    items = payload["items"]
+    lock = threading.Lock()
+    model_trace: dict[str, str] = {}
+
+    def _one(idx: int, model: str):
+        item = items[idx]
+        try:
+            backend.generate(
+                prompt=item["prompt"],
+                aspect_ratio=item["aspect_ratio"],
+                image_size=item.get("image_size", "1K"),
+                output_dir=output_dir,
+                filename=Path(item["filename"]).stem,
+                model=model,
+                max_retries=0,
+            )
+            return idx, None
+        except Exception as exc:  # noqa: BLE001 — backend raises arbitrary types
+            return idx, exc
+
+    for model in models:
+        pending = [
+            i for i, it in enumerate(items)
+            if it["status"] in {"Pending", "Failed"}
+        ]
+        if not pending:
+            break
+        batch = max(1, min(concurrency, len(pending)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch) as ex:
+            futures = [ex.submit(_one, i, model) for i in pending]
+            for fut in concurrent.futures.as_completed(futures):
+                idx, exc = fut.result()
+                item = items[idx]
+                with lock:
+                    if exc is None:
+                        item["status"] = "Generated"
+                        item.pop("last_error", None)
+                        model_trace[item["filename"]] = model
+                    else:
+                        item["status"] = "Failed"
+                        item["last_error"] = str(exc)[:500]
+                        item["last_model"] = model
+
+    ok = sum(1 for it in items if it["status"] == "Generated")
+    failed = sum(1 for it in items if it["status"] == "Failed")
+    return ok, failed, model_trace
 
 
 def _image_concurrency(pending_count: int) -> int:
