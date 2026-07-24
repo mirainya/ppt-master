@@ -45,6 +45,15 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _model_list() -> list[str]:
+    """Parse PPT_IMAGE_MODEL into an ordered fallback chain (first = primary)."""
+    raw = _required_env("PPT_IMAGE_MODEL")
+    models = [part.strip() for part in raw.split(",") if part.strip()]
+    if not models:
+        raise RuntimeError("Image generation is not configured: PPT_IMAGE_MODEL is empty")
+    return models
+
+
 def _image_concurrency(pending_count: int) -> int:
     raw_value = os.environ.get("PPT_IMAGE_CONCURRENCY", "0").strip().lower()
     if raw_value in {"", "0", "auto"}:
