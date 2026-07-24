@@ -163,7 +163,7 @@ def _manifest_path(value: str) -> Path:
     return candidate
 
 
-def _validate_manifest(path: Path, model: str) -> dict[str, Any]:
+def _validate_manifest(path: Path, models: list[str]) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -183,7 +183,7 @@ def _validate_manifest(path: Path, model: str) -> dict[str, Any]:
         aspect_ratio = str(item.get("aspect_ratio", "")).strip()
         status = str(item.get("status", "")).strip()
         image_size = str(item.get("image_size", "1K")).strip()
-        item_model = str(item.get("model", model)).strip()
+        item_model = str(item.get("model", models[0])).strip()
         if not filename or Path(filename).name != filename:
             raise ValueError(f"Image item {index} has an invalid filename")
         if Path(filename).suffix.lower() not in _IMAGE_SUFFIXES:
@@ -199,8 +199,10 @@ def _validate_manifest(path: Path, model: str) -> dict[str, Any]:
             raise ValueError(f"Image item {index} has an unsupported image size")
         if status not in _ALLOWED_STATUSES:
             raise ValueError(f"Image item {index} has an invalid status")
-        if item_model != model:
-            raise ValueError(f"Image item {index} cannot override the configured model")
+        if item_model not in models:
+            raise ValueError(
+                f"Image item {index} model must be one of the configured PPT_IMAGE_MODEL values"
+            )
     return payload
 
 
