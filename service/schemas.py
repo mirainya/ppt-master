@@ -64,6 +64,13 @@ class JobRead(BaseModel):
     error: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
+    files_purged_at: datetime | None = None
+
+
+class AdminJobRead(JobRead):
+    """Task row for the admin console: adds the owner's username."""
+
+    owner_username: str | None = None
 
 
 class JobEventRead(BaseModel):
