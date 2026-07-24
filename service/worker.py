@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 from time import time
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from service.agent_runner import AgentRunCancelled, AgentRunner, RunnerResult
@@ -635,6 +636,36 @@ async def _maintain_worker_presence(
             continue
 
 
+_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+async def _maintain_file_retention(
+    repository: JobRepository,
+    storage: JobStorage,
+    settings: Settings,
+    stop: asyncio.Event,
+) -> None:
+    """Purge on-disk files of terminal tasks older than the retention window."""
+    retention_days = settings.job_retention_days
+    if retention_days <= 0:
+        return
+    while not stop.is_set():
+        try:
+            cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+            for job in await repository.list_purgeable_jobs(cutoff):
+                if job["status"] not in {s.value for s in TERMINAL_STATUSES}:
+                    continue
+                if storage.purge_job_files(job["id"]):
+                    await repository.mark_job_purged(job["id"])
+                    logger.info("Purged files for expired task %s", job["id"])
+        except Exception:
+            logger.exception("File retention sweep failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_CLEANUP_INTERVAL_SECONDS)
+        except TimeoutError:
+            continue
+
+
 async def run_worker() -> None:
     """Consume Redis jobs until the process is stopped."""
     settings = Settings.from_env()
@@ -654,6 +685,10 @@ async def run_worker() -> None:
     stop_presence = asyncio.Event()
     presence_task = asyncio.create_task(
         _maintain_worker_presence(queue, worker_id, settings, stop_presence)
+    )
+    stop_retention = asyncio.Event()
+    retention_task = asyncio.create_task(
+        _maintain_file_retention(repository, storage, settings, stop_retention)
     )
 
     try:
@@ -747,6 +782,8 @@ async def run_worker() -> None:
     finally:
         stop_presence.set()
         await presence_task
+        stop_retention.set()
+        await retention_task
         await queue.forget_worker(worker_id)
         await runner.close()
         await queue.close()
