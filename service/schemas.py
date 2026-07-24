@@ -263,6 +263,21 @@ class PricingUpdate(BaseModel):
     hold_amount: float = Field(ge=0, allow_inf_nan=False)
 
 
+class ImageCapabilityItem(BaseModel):
+    """One selectable image-generation model from the relay's capabilities."""
+
+    code: str
+    label: str
+
+
+class ImageCapabilitiesRead(BaseModel):
+    """Available image models for the admin model picker; degrades gracefully."""
+
+    available: bool
+    error: str | None = None
+    models: list[ImageCapabilityItem] = []
+
+
 class RuntimeConfigRead(BaseModel):
     """Administrator-safe provider configuration without plaintext API keys."""
 

@@ -1338,6 +1338,35 @@ async def admin_update_pricing(
     }
 
 
+def _filter_image_capabilities(payload: object) -> list[dict[str, str]]:
+    """Extract selectable image models from a relay /capabilities payload.
+
+    Keeps only entries with type == "image" and at least one channel. Label
+    falls back to the code when name is blank. Any unexpected shape yields [].
+    """
+    if not isinstance(payload, dict):
+        return []
+    entries = payload.get("data")
+    if not isinstance(entries, list):
+        return []
+    models: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "image":
+            continue
+        channels = entry.get("channels")
+        if not isinstance(channels, list) or not channels:
+            continue
+        code = entry.get("code")
+        if not isinstance(code, str) or not code.strip():
+            continue
+        name = entry.get("name")
+        label = name.strip() if isinstance(name, str) and name.strip() else code
+        models.append({"code": code, "label": label})
+    return models
+
+
 def _runtime_config_read(config: RuntimeConfig) -> dict:
     return {
         "codex_base_url": config.codex_base_url,
