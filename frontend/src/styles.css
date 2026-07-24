@@ -2904,26 +2904,39 @@ input[aria-invalid="true"]:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
 }
 
+.settings-field-wide {
+  grid-column: 1 / -1;
+}
+
 .model-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 .model-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 10px;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: 14px;
-  background: transparent;
+  padding: 5px 12px;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.model-chip:hover {
+  border-color: var(--accent);
 }
 
 .model-chip-active {
-  border-color: var(--accent, #1a3a6b);
-  background: var(--secondary-bg, #f4f6f8);
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  font-weight: 650;
 }

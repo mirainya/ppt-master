@@ -167,7 +167,7 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
               }
             />
           </label>
-          <label>
+          <label className="settings-field-wide">
             <span>模型（可点选或手输，逗号分隔为降级链）</span>
             <input
               value={config.image_model}
@@ -176,27 +176,27 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
                 rc.setConfig({ ...config, image_model: event.target.value })
               }
             />
+            {rc.imageModels.length > 0 && (
+              <div className="model-chips">
+                {rc.imageModels.map((model) => (
+                  <button
+                    type="button"
+                    key={model.code}
+                    className={
+                      chain.includes(model.code)
+                        ? "model-chip model-chip-active"
+                        : "model-chip"
+                    }
+                    onClick={() => toggleModel(model.code)}
+                    title={model.code}
+                  >
+                    {chain.includes(model.code) && <Check size={13} />}
+                    <span>{model.label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </label>
-          {rc.imageModels.length > 0 && (
-            <div className="model-chips">
-              {rc.imageModels.map((model) => (
-                <button
-                  type="button"
-                  key={model.code}
-                  className={
-                    chain.includes(model.code)
-                      ? "model-chip model-chip-active"
-                      : "model-chip"
-                  }
-                  onClick={() => toggleModel(model.code)}
-                  title={model.code}
-                >
-                  {chain.includes(model.code) && <Check size={13} />}
-                  <span>{model.label}</span>
-                </button>
-              ))}
-            </div>
-          )}
           <label>
             <span>尺寸</span>
             <input
