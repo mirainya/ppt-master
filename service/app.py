@@ -50,6 +50,7 @@ from service.repository import (
     OrganizationUnavailableError,
 )
 from service.schemas import (
+    AdminJobRead,
     AdminUserCreate,
     AdminUserPasswordUpdate,
     AdminUserRead,
@@ -1027,6 +1028,36 @@ async def org_usage(
         until=until,
     )
     return {"org_id": user.org_id, "end_users": rows}
+
+
+@app.get("/v1/admin/jobs", response_model=list[AdminJobRead])
+async def admin_list_jobs(
+    request: Request,
+    admin: AdminUser,
+    limit: int = 50,
+) -> list[dict]:
+    """List every task across all users for the admin console."""
+    return await _repository(request).list_all_jobs(limit)
+
+
+@app.post("/v1/admin/jobs/{job_id}/purge", response_model=AdminJobRead)
+async def admin_purge_job(
+    request: Request,
+    job_id: UUID,
+    admin: AdminUser,
+) -> dict:
+    """Delete one task's on-disk files while keeping its record and billing."""
+    job = await _repository(request).get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] not in {s.value for s in TERMINAL_STATUSES}:
+        raise HTTPException(
+            status_code=409,
+            detail="task is still active; cancel it before purging files",
+        )
+    request.app.state.storage.purge_job_files(job_id)
+    updated = await _repository(request).mark_job_purged(job_id)
+    return updated if updated is not None else job
 
 
 @app.get("/v1/admin/users", response_model=list[AdminUserRead])
