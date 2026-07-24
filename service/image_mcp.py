@@ -272,14 +272,15 @@ def _write_audit(state: str, **details: Any) -> None:
 def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
     api_key = _required_env("PPT_IMAGE_API_KEY")
     base_url = _required_env("PPT_IMAGE_BASE_URL").rstrip("/")
-    model = _required_env("PPT_IMAGE_MODEL")
+    models = _model_list()
+    model = models[0]  # primary, for audit/env defaults and result message
     image_size = _required_env("PPT_IMAGE_SIZE")
     parsed_url = urlparse(base_url)
     if parsed_url.scheme != "https" or not parsed_url.netloc:
         raise RuntimeError("PPT_IMAGE_BASE_URL must be an HTTPS URL")
 
     manifest = _manifest_path(manifest_path)
-    payload = _validate_manifest(manifest, model)
+    payload = _validate_manifest(manifest, models)
     relative_manifest = manifest.relative_to(_job_dir()).as_posix()
     prior_total = _read_cumulative_total(payload, relative_manifest)
     initial_statuses = [str(item["status"]) for item in payload["items"]]
@@ -300,6 +301,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
     audit_details = {
         "manifest_path": relative_manifest,
         "model": model,
+        "models": models,
         "item_count": len(payload["items"]),
         "pending_files": pending_files,
         "requested_image_size": image_size,
@@ -324,14 +326,12 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         with redirect_stdout(sys.stderr):
             image_gen = _load_image_gen()
             backend, _ = image_gen._load_backend("openai")
-            _, failed, _ = image_gen._run_manifest(
+            ok, failed, model_trace = _run_with_fallback(
                 payload,
-                str(manifest),
                 backend,
-                initial_concurrency=concurrency,
-                image_size="1K",
+                models=models,
+                concurrency=concurrency,
                 output_dir=str(manifest.parent),
-                model=model,
             )
             image_gen.render_manifest_md_to_file(str(manifest), payload)
         if failed:
@@ -357,7 +357,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         "manifest_path": str(manifest.relative_to(_job_dir())),
         "generated_files": generated_files,
         "generated_dimensions": generated_dimensions,
-        "message": f"Generated {len(generated_files)} image(s) with {model}",
+        "message": f"Generated {len(generated_files)} image(s) with models {models}",
         "requested_image_size": image_size,
     }
     succeeded_details = {
@@ -369,6 +369,7 @@ def _generate_image_manifest(manifest_path: str) -> dict[str, Any]:
         "succeeded",
         generated_files=generated_files,
         generated_dimensions=generated_dimensions,
+        model_trace=model_trace,
         **succeeded_details,
     )
     return result
