@@ -1406,9 +1406,13 @@ async def admin_get_image_capabilities(request: Request, admin: AdminUser) -> di
         return {"available": False, "error": "生图渠道未配置", "models": []}
     url = base + "/capabilities"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
-    try:
+
+    def _fetch() -> object:
         with urllib.request.urlopen(req, timeout=15) as response:
-            payload = json.loads(response.read())
+            return json.loads(response.read())
+
+    try:
+        payload = await asyncio.to_thread(_fetch)
     except urllib.error.HTTPError as exc:
         return {"available": False, "error": f"渠道返回 {exc.code}", "models": []}
     except Exception:  # noqa: BLE001 — network/JSON errors all degrade the same way
