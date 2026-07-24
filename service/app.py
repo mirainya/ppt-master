@@ -278,6 +278,13 @@ async def _require_job(
     return job
 
 
+async def _reject_if_purged(request: Request, job_id: UUID) -> None:
+    """Return 410 when a task's files were intentionally cleaned up."""
+    job = await _repository(request).get_job(job_id)
+    if job is not None and job.get("files_purged_at") is not None:
+        raise HTTPException(status_code=410, detail="task files have been cleaned up")
+
+
 async def _reserve_continuation_hold(request: Request, job: dict) -> None:
     """Reserve the next turn before a confirmation or revision is queued."""
     org_id = job.get("org_id")
@@ -927,6 +934,7 @@ async def download_artifact(
     user: CurrentUser,
 ) -> FileResponse:
     await _require_job(request, job_id, user)
+    await _reject_if_purged(request, job_id)
     artifact = await _repository(request).get_artifact(job_id, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail="artifact not found")
@@ -951,6 +959,7 @@ async def view_artifact(
     user: CurrentUser,
 ) -> FileResponse:
     await _require_job(request, job_id, user)
+    await _reject_if_purged(request, job_id)
     live_preview = next(
         (
             preview
