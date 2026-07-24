@@ -1,4 +1,5 @@
-import { RefreshCw, Trash2 } from "lucide-react";
+import { Eye, RefreshCw, Trash2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { formatDate } from "../lib/jobDisplay";
 import type { useAdminJobs } from "../hooks/useAdminJobs";
@@ -7,6 +8,8 @@ type JobsHook = ReturnType<typeof useAdminJobs>;
 
 /** Admin task console: view every task and clean up one task's files. */
 export function JobsPanel({ jobs }: { jobs: JobsHook }) {
+  const navigate = useNavigate();
+
   const confirmPurge = (id: string, title: string | null) => {
     if (window.confirm(`确定清理任务「${title || id}」的文件吗？此操作不可恢复。`)) {
       void jobs.purge(id);
@@ -43,15 +46,26 @@ export function JobsPanel({ jobs }: { jobs: JobsHook }) {
               <td>{formatDate(job.updated_at)}</td>
               <td>{job.files_purged_at ? "已清理" : "在库"}</td>
               <td>
-                {!job.files_purged_at && (
-                  <button
-                    className="secondary-command"
-                    onClick={() => confirmPurge(job.id, job.title)}
-                  >
-                    <Trash2 size={15} />
-                    <span>清理文件</span>
-                  </button>
-                )}
+                <div className="user-row-actions">
+                  {!job.files_purged_at && (
+                    <button
+                      className="secondary-command"
+                      onClick={() => navigate(`/?job=${job.id}`)}
+                    >
+                      <Eye size={15} />
+                      <span>预览</span>
+                    </button>
+                  )}
+                  {!job.files_purged_at && (
+                    <button
+                      className="secondary-command"
+                      onClick={() => confirmPurge(job.id, job.title)}
+                    >
+                      <Trash2 size={15} />
+                      <span>清理文件</span>
+                    </button>
+                  )}
+                </div>
               </td>
             </tr>
           ))}

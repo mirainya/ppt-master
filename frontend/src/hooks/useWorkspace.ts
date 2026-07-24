@@ -70,12 +70,15 @@ export function useWorkspace(client: ApiClient | null) {
   useEffect(() => {
     if (!client) return;
     let active = true;
+    // An admin opening another user's job via ?job=<id> selects it directly;
+    // refreshJob then fetches it (backend allows admin read) and adds it in.
+    const requestedId = new URLSearchParams(window.location.search).get("job");
     client
       .listJobs()
       .then((nextJobs) => {
         if (!active) return;
         setJobs(nextJobs);
-        setSelectedId((current) => current || nextJobs[0]?.id || null);
+        setSelectedId((current) => current || requestedId || nextJobs[0]?.id || null);
       })
       .catch((reason: unknown) => {
         if (active)
