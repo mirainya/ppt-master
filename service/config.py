@@ -142,6 +142,12 @@ class Settings:
                 "PPT_IMAGE_BASE_URL and PPT_IMAGE_MODEL are required when "
                 "PPT_IMAGE_API_KEY is set"
             )
+        if self.image_api_key:
+            parsed_models = [m.strip() for m in self.image_model.split(",") if m.strip()]
+            if not parsed_models:
+                raise RuntimeError(
+                    "PPT_IMAGE_MODEL must list at least one model name"
+                )
         if self.image_base_url:
             parsed = urlparse(self.image_base_url)
             if parsed.scheme != "https" or not parsed.netloc:
