@@ -89,6 +89,18 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
 
   const config = rc.config;
 
+  const chain = config.image_model
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const toggleModel = (code: string) => {
+    const next = chain.includes(code)
+      ? chain.filter((item) => item !== code)
+      : [...chain, code];
+    rc.setConfig({ ...config, image_model: next.join(",") });
+  };
+
   return (
     <form className="settings-form admin-panel-body" onSubmit={rc.save}>
       <div className="settings-scope-note">
@@ -156,7 +168,7 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
             />
           </label>
           <label>
-            <span>模型</span>
+            <span>模型（可点选或手输，逗号分隔为降级链）</span>
             <input
               value={config.image_model}
               placeholder="gpt-image-2"
@@ -165,6 +177,26 @@ export function RuntimeConfigPanel({ rc }: { rc: RuntimeConfigHook }) {
               }
             />
           </label>
+          {rc.imageModels.length > 0 && (
+            <div className="model-chips">
+              {rc.imageModels.map((model) => (
+                <button
+                  type="button"
+                  key={model.code}
+                  className={
+                    chain.includes(model.code)
+                      ? "model-chip model-chip-active"
+                      : "model-chip"
+                  }
+                  onClick={() => toggleModel(model.code)}
+                  title={model.code}
+                >
+                  {chain.includes(model.code) && <Check size={13} />}
+                  <span>{model.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <label>
             <span>尺寸</span>
             <input

@@ -2903,3 +2903,27 @@ input[aria-invalid="true"]:focus {
   outline: none;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 16%, transparent);
 }
+
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 14px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.model-chip-active {
+  border-color: var(--accent, #1a3a6b);
+  background: var(--secondary-bg, #f4f6f8);
+}
