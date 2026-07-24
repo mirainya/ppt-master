@@ -5,16 +5,19 @@ import {
   Building2,
   Coins,
   KeyRound,
+  ListChecks,
   Presentation,
   Settings,
   Users,
 } from "lucide-react";
 
 import { AccountsPanel } from "../components/AccountsPanel";
+import { JobsPanel } from "../components/JobsPanel";
 import { OrgsPanel } from "../components/OrgsPanel";
 import { PricingPanel } from "../components/PricingPanel";
 import { RuntimeConfigPanel } from "../components/RuntimeConfigPanel";
 import { ThemeSwitcher } from "../components/ThemeSwitcher";
+import { useAdminJobs } from "../hooks/useAdminJobs";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import { useAuth } from "../hooks/authContext";
 import { useOrgs } from "../hooks/useOrgs";
@@ -27,13 +30,14 @@ interface AdminPageProps {
   onTheme: (theme: AppTheme) => void;
 }
 
-type AdminTab = "accounts" | "orgs" | "billing" | "runtime";
+type AdminTab = "accounts" | "orgs" | "billing" | "runtime" | "jobs";
 
 const TABS: { key: AdminTab; label: string; icon: typeof Users }[] = [
   { key: "accounts", label: "账号管理", icon: Users },
   { key: "orgs", label: "组织与计量", icon: Building2 },
   { key: "billing", label: "计价配置", icon: Coins },
   { key: "runtime", label: "运行配置", icon: Settings },
+  { key: "jobs", label: "任务管理", icon: ListChecks },
 ];
 
 /**
@@ -48,6 +52,7 @@ export function AdminPage({ theme, onTheme }: AdminPageProps) {
   const rc = useRuntimeConfig(apiClient);
   const pricing = usePricing(apiClient);
   const orgs = useOrgs(apiClient);
+  const adminJobs = useAdminJobs(apiClient);
 
   useEffect(() => {
     if (tab === "runtime" && !rc.config) void rc.load();
@@ -119,6 +124,7 @@ export function AdminPage({ theme, onTheme }: AdminPageProps) {
           {tab === "orgs" && <OrgsPanel orgs={orgs} />}
           {tab === "billing" && <PricingPanel pricing={pricing} />}
           {tab === "runtime" && <RuntimeConfigPanel rc={rc} />}
+          {tab === "jobs" && <JobsPanel jobs={adminJobs} />}
         </div>
       </main>
     </div>
