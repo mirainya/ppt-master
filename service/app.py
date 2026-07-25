@@ -1129,13 +1129,26 @@ def _org_webhook_read(config) -> dict:
     }
 
 
-@app.get("/v1/orgs/webhook", response_model=OrgWebhookRead)
-async def org_webhook(request: Request, org_id: OrgKeyOnly) -> dict:
-    """Read this organization's usage callback configuration."""
-    config = await request.app.state.webhook_repository.get(org_id)
+async def _read_org_webhook(request: Request, org_id: UUID) -> dict:
+    """Fetch and shape one org's callback config, or 404 when unset.
+
+    Maps an unusable encryption key to 503 like the write path does, so a missing
+    or rotated PPT_RUNTIME_CONFIG_KEY reads as a service condition rather than an
+    unexplained 500.
+    """
+    try:
+        config = await request.app.state.webhook_repository.get(org_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if config is None:
         raise HTTPException(status_code=404, detail="webhook is not configured")
     return _org_webhook_read(config)
+
+
+@app.get("/v1/orgs/webhook", response_model=OrgWebhookRead)
+async def org_webhook(request: Request, org_id: OrgKeyOnly) -> dict:
+    """Read this organization's usage callback configuration."""
+    return await _read_org_webhook(request, org_id)
 
 
 @app.get("/v1/orgs/webhook/deliveries", response_model=list[OrgWebhookDeliveryRead])
@@ -1402,10 +1415,7 @@ async def admin_get_org_webhook(
     """Read one organization's usage callback configuration."""
     if await request.app.state.auth_repository.get_organization(org_id) is None:
         raise HTTPException(status_code=404, detail="organization not found")
-    config = await request.app.state.webhook_repository.get(org_id)
-    if config is None:
-        raise HTTPException(status_code=404, detail="webhook is not configured")
-    return _org_webhook_read(config)
+    return await _read_org_webhook(request, org_id)
 
 
 @app.put("/v1/admin/orgs/{org_id}/webhook", response_model=OrgWebhookCreated)
@@ -1447,7 +1457,12 @@ async def admin_test_org_webhook(
     Not recorded in webhook_deliveries: test traffic must not pollute the outbox
     an enterprise reconciles against.
     """
-    config = await request.app.state.webhook_repository.get(org_id)
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    try:
+        config = await request.app.state.webhook_repository.get(org_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if config is None:
         raise HTTPException(status_code=404, detail="webhook is not configured")
     outcome = await asyncio.to_thread(

@@ -73,7 +73,7 @@ def test_target_reflects_enabled_flag():
     assert asyncio.run(JobRepository._webhook_target(disabled, ORG_ID)) is False
 
 
-def test_enqueue_inserts_inside_a_savepoint():
+def test_enqueue_inserts_the_delivery_row():
     connection = _FakeConnection()
     asyncio.run(
         JobRepository._enqueue_webhook(
@@ -87,24 +87,60 @@ def test_enqueue_inserts_inside_a_savepoint():
     )
     inserts = _delivery_inserts(connection)
     assert len(inserts) == 1
-    # Savepoint keeps a callback-table problem from rolling back the charge.
-    assert connection.savepoints == 1
     assert inserts[0][3] == "usage.turn"
     assert inserts[0][4] == "turn-1"
 
 
-def test_enqueue_failure_is_swallowed():
+def test_turn_failure_is_contained_in_a_savepoint():
+    """A broken callback table must not roll back the charge it rode with."""
     connection = _FakeConnection(fail_insert=True)
+    repository = JobRepository.__new__(JobRepository)
+    record = {
+        "turn_id": "turn-7",
+        "input_tokens": 1,
+        "output_tokens": 1,
+        "images": 0,
+        "pages": 0,
+        "charged_credits": 0.1,
+        "created_at": datetime(2026, 7, 25, 9, 0, 0, tzinfo=UTC),
+        "end_user_id": uuid4(),
+    }
     asyncio.run(
-        JobRepository._enqueue_webhook(
-            connection,
-            org_id=ORG_ID,
-            job_id=JOB_ID,
-            event_type="usage.final",
-            event_key="3",
-            payload={},
-        )
+        repository._try_enqueue_turn_webhook(connection, record, JOB_ID, ORG_ID)
     )
+    assert _delivery_inserts(connection) == []
+    # The savepoint wraps the enabled-check and payload reads too, not just the insert.
+    assert connection.savepoints == 1
+
+
+def test_final_failure_is_contained_in_a_savepoint():
+    connection = _FakeConnection(fail_insert=True)
+    repository = JobRepository.__new__(JobRepository)
+    job = {
+        "id": JOB_ID,
+        "org_id": ORG_ID,
+        "owner_id": uuid4(),
+        "status": "succeeded",
+        "updated_at": datetime(2026, 7, 25, 10, 0, 0, tzinfo=UTC),
+        "billed_turns": 3,
+    }
+    asyncio.run(repository._try_enqueue_final_webhook(connection, job))
+    assert _delivery_inserts(connection) == []
+    assert connection.savepoints == 1
+
+
+def test_disabled_org_is_not_queried_for_payload():
+    connection = _FakeConnection(enabled=False)
+    repository = JobRepository.__new__(JobRepository)
+    job = {
+        "id": JOB_ID,
+        "org_id": ORG_ID,
+        "owner_id": uuid4(),
+        "status": "succeeded",
+        "updated_at": datetime(2026, 7, 25, 10, 0, 0, tzinfo=UTC),
+        "billed_turns": 3,
+    }
+    asyncio.run(repository._try_enqueue_final_webhook(connection, job))
     assert _delivery_inserts(connection) == []
 
 

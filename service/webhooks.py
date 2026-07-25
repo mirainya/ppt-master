@@ -352,6 +352,22 @@ class WebhookRepository:
             )
         return self._fernet is not None
 
+    async def prune_deliveries(self, retention_days: int) -> int:
+        """Delete finished deliveries past the retention window.
+
+        Only touches rows that already reached a terminal state — pending events are
+        never dropped, since losing one silently costs the enterprise real money.
+        """
+        result = await self.database.require_pool().execute(
+            """
+            DELETE FROM webhook_deliveries
+            WHERE (delivered_at IS NOT NULL OR dead_at IS NOT NULL)
+              AND created_at < CURRENT_TIMESTAMP - ($1 || ' days')::interval
+            """,
+            str(retention_days),
+        )
+        return int(result.rsplit(" ", 1)[-1] or 0)
+
     async def count_pending(self) -> int:
         """How many events are waiting to be delivered, for operator visibility."""
         return await self.database.require_pool().fetchval(
@@ -393,7 +409,10 @@ class WebhookRepository:
         is returned in plaintext only on the call that creates or rotates it.
         """
         normalized_url = validate_callback_url(callback_url)
-        existing = await self.get(org_id)
+        # Skip reading the old row when rotating: decrypting a secret that has gone
+        # bad is exactly what rotation is meant to escape, so requiring it first
+        # would leave no way back except editing the table by hand.
+        existing = None if rotate_secret else await self.get(org_id)
         new_secret: str | None = None
         if existing is None or rotate_secret:
             new_secret = secrets.token_urlsafe(32)

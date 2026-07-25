@@ -144,3 +144,44 @@ def test_missing_callback_is_dropped_without_sending(monkeypatch):
     )
     assert sent == []
     assert len(repository.dead) == 1
+
+
+class _PoisonRepository(_FakeWebhookRepository):
+    """Stands in for an org whose stored secret can no longer be decrypted."""
+
+    async def get(self, org_id):
+        raise RuntimeError("webhook secret encryption is invalid")
+
+
+def test_undecryptable_secret_dies_instead_of_burning_healthy_rows(monkeypatch):
+    """A poison row must not starve the batch queued behind it.
+
+    Claiming already incremented attempts, so a row that keeps escaping the
+    dead-letter check would let every event behind it exhaust its budget without
+    ever being sent.
+    """
+    repository = _PoisonRepository()
+    poison = _delivery()
+    sent = []
+    monkeypatch.setattr(
+        worker,
+        "deliver_sync",
+        lambda **kwargs: sent.append(kwargs) or DeliveryOutcome(True, 200, "", False),
+    )
+    asyncio.run(worker._deliver_one(repository, poison, _settings()))
+    assert [row[0] for row in repository.dead] == [poison["id"]]
+    assert sent == []
+
+
+def test_healthy_row_still_delivers_through_the_guard(monkeypatch):
+    repository = _FakeWebhookRepository()
+    delivery = _delivery()
+    sent = []
+    monkeypatch.setattr(
+        worker,
+        "deliver_sync",
+        lambda **kwargs: sent.append(kwargs) or DeliveryOutcome(True, 200, "", False),
+    )
+    asyncio.run(worker._deliver_one(repository, delivery, _settings()))
+    assert repository.delivered == [(delivery["id"], 200)]
+    assert len(sent) == 1

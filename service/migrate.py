@@ -45,6 +45,7 @@ async def apply_migrations(database_url: str) -> None:
             rows = await connection.fetch("SELECT version FROM schema_migrations")
             applied = {row["version"] for row in rows}
 
+        applied_now = 0
         for path in migration_files():
             if path.name in applied:
                 continue
@@ -56,6 +57,11 @@ async def apply_migrations(database_url: str) -> None:
                     path.name,
                 )
             print(f"Applied {path.name}")
+            applied_now += 1
+        if applied_now == 0:
+            # Say so explicitly: silence here is ambiguous between "already up to
+            # date" and "the file never made it into this image".
+            print("No pending migrations")
     finally:
         try:
             await connection.execute("SELECT pg_advisory_unlock(781245907)")

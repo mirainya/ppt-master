@@ -33,6 +33,10 @@ services:
       PPT_IMAGE_MODEL: ${PPT_IMAGE_MODEL:-gpt_image2}
       PPT_IMAGE_SIZE: ${PPT_IMAGE_SIZE:-2048x1536}
       PPT_IMAGE_CONCURRENCY: ${PPT_IMAGE_CONCURRENCY:-auto}
+      # Usage-callback delivery; the last two only take effect in the worker.
+      PPT_WEBHOOK_TIMEOUT_SECONDS: ${PPT_WEBHOOK_TIMEOUT_SECONDS:-10}
+      PPT_WEBHOOK_MAX_ATTEMPTS: ${PPT_WEBHOOK_MAX_ATTEMPTS:-8}
+      PPT_WEBHOOK_BATCH_SIZE: ${PPT_WEBHOOK_BATCH_SIZE:-20}
     healthcheck:
       test:
         - CMD

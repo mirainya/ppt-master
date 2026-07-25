@@ -321,11 +321,31 @@ class JobRepository:
                     job_id,
                     balance_after,
                 )
-                if await self._webhook_target(connection, org_id):
-                    await self._enqueue_turn_webhook(connection, record, job_id, org_id)
+                await self._try_enqueue_turn_webhook(connection, record, job_id, org_id)
                 result = dict(record)
                 result["actual_cost"] = round(actual_cost, 4)
                 return result
+
+    async def _try_enqueue_turn_webhook(
+        self,
+        connection: asyncpg.Connection,
+        record: asyncpg.Record,
+        job_id: UUID,
+        org_id: UUID,
+    ) -> None:
+        """Queue this turn's callback without ever endangering the charge.
+
+        The whole judgment — reading org_webhooks, building the payload, inserting
+        the row — sits in one savepoint. Protecting only the insert would leave the
+        reads bare, so an unreadable callback table would roll back the charge it
+        rode with, which is exactly what this design must not allow.
+        """
+        try:
+            async with connection.transaction():
+                if await self._webhook_target(connection, org_id):
+                    await self._enqueue_turn_webhook(connection, record, job_id, org_id)
+        except Exception:
+            logger.exception("Could not queue usage.turn webhook for %s", job_id)
 
     async def _enqueue_turn_webhook(
         self,
@@ -493,11 +513,27 @@ class JobRepository:
                         message,
                         {"progress": progress, "error": error},
                     )
-                    if status in TERMINAL_STATUSES and await self._webhook_target(
-                        connection, record["org_id"]
-                    ):
-                        await self._enqueue_final_webhook(connection, record)
+                    if status in TERMINAL_STATUSES:
+                        await self._try_enqueue_final_webhook(connection, record)
         return dict(record) if record else None
+
+    async def _try_enqueue_final_webhook(
+        self,
+        connection: asyncpg.Connection,
+        job: asyncpg.Record,
+    ) -> None:
+        """Queue the terminal callback without ever endangering the status write.
+
+        A rollback here would leave the job stuck short of its terminal state, and
+        the worker's own failure path also goes through set_status, so the job
+        would be re-leased and re-run forever while burning real cost.
+        """
+        try:
+            async with connection.transaction():
+                if await self._webhook_target(connection, job["org_id"]):
+                    await self._enqueue_final_webhook(connection, job)
+        except Exception:
+            logger.exception("Could not queue usage.final webhook for %s", job["id"])
 
     async def _enqueue_final_webhook(
         self,
@@ -837,30 +873,26 @@ class JobRepository:
         event_key: str,
         payload: dict[str, Any],
     ) -> None:
-        """Queue one usage callback inside the caller's transaction.
+        """Queue one usage callback inside the caller's savepoint.
 
-        Rides along with the billing or status write so a delivered charge always
-        has a queued event, but sits in its own savepoint: a problem with the
-        callback table must never roll back the charge or the status it rode with.
+        Callers wrap this together with the enabled-check and payload build, so no
+        savepoint is opened here — nesting a second one would only obscure which
+        statements the rollback actually covers.
         """
-        try:
-            async with connection.transaction():
-                await connection.execute(
-                    """
-                    INSERT INTO webhook_deliveries
-                        (id, org_id, job_id, event_type, event_key, payload)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (job_id, event_type, event_key) DO NOTHING
-                    """,
-                    uuid4(),
-                    org_id,
-                    job_id,
-                    event_type,
-                    event_key,
-                    payload,
-                )
-        except Exception:
-            logger.exception("Could not queue %s webhook for %s", event_type, job_id)
+        await connection.execute(
+            """
+            INSERT INTO webhook_deliveries
+                (id, org_id, job_id, event_type, event_key, payload)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (job_id, event_type, event_key) DO NOTHING
+            """,
+            uuid4(),
+            org_id,
+            job_id,
+            event_type,
+            event_key,
+            payload,
+        )
 
     @staticmethod
     async def _add_event(

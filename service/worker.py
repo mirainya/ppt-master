@@ -651,6 +651,7 @@ async def _maintain_file_retention(
     repository: JobRepository,
     storage: JobStorage,
     settings: Settings,
+    webhooks: WebhookRepository,
     stop: asyncio.Event,
 ) -> None:
     """Purge on-disk files of terminal tasks older than the retention window."""
@@ -666,6 +667,9 @@ async def _maintain_file_retention(
                 if storage.purge_job_files(job["id"]):
                     await repository.mark_job_purged(job["id"])
                     logger.info("Purged files for expired task %s", job["id"])
+            pruned = await webhooks.prune_deliveries(retention_days)
+            if pruned:
+                logger.info("Pruned %s finished usage webhook delivery row(s)", pruned)
         except Exception:
             logger.exception("File retention sweep failed")
         try:
@@ -720,6 +724,29 @@ async def _push_delivery(
     )
 
 
+async def _deliver_one(
+    webhooks: WebhookRepository,
+    delivery: dict,
+    settings: Settings,
+) -> None:
+    """Attempt one delivery, containing any failure to that single row.
+
+    An undecryptable secret cannot be retried into working, so the row is retired
+    here. Without that, it would never reach the dead-letter check inside
+    _push_delivery, and because claiming already incremented attempts, every
+    healthy row queued behind it would burn its budget without ever being sent.
+    """
+    try:
+        await _push_delivery(webhooks, delivery, settings)
+    except RuntimeError as exc:
+        logger.exception("Usage webhook %s cannot be delivered", delivery["id"])
+        await webhooks.mark_dead(
+            delivery["id"], response_status=None, error=str(exc)
+        )
+    except Exception:
+        logger.exception("Usage webhook %s failed before sending", delivery["id"])
+
+
 async def _maintain_webhook_delivery(
     webhooks: WebhookRepository,
     settings: Settings,
@@ -753,7 +780,7 @@ async def _maintain_webhook_delivery(
                 for delivery in deliveries:
                     if stop.is_set():
                         break
-                    await _push_delivery(webhooks, delivery, settings)
+                    await _deliver_one(webhooks, delivery, settings)
         except Exception:
             logger.exception("Usage webhook sweep failed")
         try:
@@ -782,11 +809,11 @@ async def run_worker() -> None:
     presence_task = asyncio.create_task(
         _maintain_worker_presence(queue, worker_id, settings, stop_presence)
     )
+    webhooks = WebhookRepository(database, settings)
     stop_retention = asyncio.Event()
     retention_task = asyncio.create_task(
-        _maintain_file_retention(repository, storage, settings, stop_retention)
+        _maintain_file_retention(repository, storage, settings, webhooks, stop_retention)
     )
-    webhooks = WebhookRepository(database, settings)
     stop_webhooks = asyncio.Event()
     webhook_task = asyncio.create_task(
         _maintain_webhook_delivery(webhooks, settings, stop_webhooks)
