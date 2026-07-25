@@ -80,7 +80,7 @@ curl -X POST https://ppt.mirainya.icu/v1/jobs/<job_id>/confirmation \
   -d '{"approved":true,"message":""}'
 ```
 
-`generate_pptx` 在 `awaiting_confirmation` 处阻塞等待确认。**未确认的任务不会自动结束**，会一直占着一份预扣额度 —— 建议企业侧给挂单设超时，超过 N 天未确认就主动取消（见第 7 节）。
+`generate_pptx` 在 `awaiting_confirmation` 处阻塞等待确认。**未确认的任务不会自动结束**，会一直占着一份预扣额度 —— 建议企业侧给挂单设超时，超过 N 天未确认就主动取消（见 6.5）。
 
 ### 下载产物
 
@@ -95,7 +95,7 @@ curl -OJ https://ppt.mirainya.icu/v1/jobs/<job_id>/artifacts/<artifact_id>/downl
 
 ---
 
-## 5. 取消耗：三条路
+## 5. 取用量：三条路
 
 本服务按 **token + 生图** 的真实成本扣组织预付余额（第 1 层）。企业用下面的用量凭证，按自己的定价向终端用户计费（第 2 层，本服务不参与）。
 
