@@ -125,7 +125,7 @@ curl https://<host>/v1/jobs/<job_id>/usage \
   "job_id": "...",
   "end_user_id": "cust-42",
   "status": "final",
-  "usage": {"input_tokens": 12000, "output_tokens": 3400, "images": 5, "pages": 12, "jobs": 1},
+  "usage": {"input_tokens": 12000, "output_tokens": 3400, "images": 5, "pages": 9, "jobs": 1},
   "our_charge": {"credits": 0.2736}
 }
 ```
@@ -133,6 +133,24 @@ curl https://<host>/v1/jobs/<job_id>/usage \
 - `status`：`partial`（任务或修订进行中）/ `final`（彻底完成）。**请在 `final` 后再对终端用户结账**——修订会追加用量。
 - `usage`：原始计量维度，企业按需定价。
 - `our_charge.credits`：本服务对该任务扣组织的真实成本，供对账参考。
+
+### 各计量维度的累计口径
+
+修订会重跑部分页面，各维度的累加方式并不相同，按页定价前请先读这一节。
+
+| 维度 | 口径 | 修订重做 3 页时 |
+|---|---|---|
+| `input_tokens` / `output_tokens` | 每轮实际消耗**逐轮累加** | 追加该轮 token |
+| `images` | 磁盘生图数的**增量**累加 | 重新生图才追加 |
+| `pages` | 磁盘当前页数的**最高水位** | 不变 |
+
+`pages` 取的是产出目录里页文件的数量，写入时只记 `max(0, 当前页数 - 已记录总和)`。
+所以 9 页的稿子重做第 4/5/6 页，`pages` 仍是 **9**，不是 12；页数减少（9 页删到 7 页）
+时 `pages` 也**不会回退**，仍是 9。要按最终交付页数计费，请在任务终态时自行读产物页数。
+
+`pages` **不参与**本服务扣费，第 1 层只按 token + 生图结算。因此修订虽然不涨 `pages`，
+`our_charge.credits` 仍会上升。按页向终端用户定价意味着**修订对用户免费而成本由企业承担**；
+若希望修订计费，请改用 `our_charge.credits` 乘系数，或自行统计修订轮次。
 
 ### 按终端用户聚合（出账）
 
