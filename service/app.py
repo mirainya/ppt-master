@@ -1047,13 +1047,35 @@ async def job_usage(request: Request, job_id: UUID, user: CurrentUser) -> dict:
 async def org_usage(
     request: Request,
     user: CurrentUser,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(bearer_scheme)
+    ],
     end_user_id: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
 ) -> dict:
-    """Aggregate the caller's organization usage, grouped by enterprise end-user."""
+    """Aggregate organization usage, grouped by enterprise end-user.
+
+    Only the organization backend (org API key) may read the whole tenant. A
+    workbench session — including one opened with an SSO ticket — is scoped to the
+    caller's own end-user so one tenant's users cannot read each other's usage.
+    """
     if user.org_id is None:
         raise HTTPException(status_code=403, detail="organization credentials required")
+    holds_org_key = credentials is not None and is_org_api_key(credentials.credentials)
+    if not holds_org_key:
+        own_external_id = await request.app.state.auth_repository.external_id_for_user(
+            user.id
+        )
+        if own_external_id is None:
+            raise HTTPException(
+                status_code=403, detail="organization credentials required"
+            )
+        if end_user_id is not None and end_user_id != own_external_id:
+            raise HTTPException(
+                status_code=403, detail="cannot read another end-user's usage"
+            )
+        end_user_id = own_external_id
     rows = await _repository(request).aggregate_org_usage(
         user.org_id,
         external_id=end_user_id,
