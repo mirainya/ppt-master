@@ -6,6 +6,8 @@ import type {
   Organization,
   OrgApiKey,
   OrgUsageRow,
+  OrgWebhook,
+  OrgWebhookTestResult,
 } from "../types";
 
 /** Admin organization management: list, create, top-up credits, keys, usage. */
@@ -25,6 +27,15 @@ export function useOrgs(apiClient: ApiClient) {
   const [keys, setKeys] = useState<OrgApiKey[]>([]);
   const [createdKey, setCreatedKey] = useState<CreatedOrgApiKey | null>(null);
   const [usage, setUsage] = useState<OrgUsageRow[]>([]);
+
+  // Usage callback (webhook). `webhook` is null until one is configured.
+  const [webhook, setWebhook] = useState<OrgWebhook | null>(null);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [webhookEnabled, setWebhookEnabled] = useState(true);
+  const [webhookSecret, setWebhookSecret] = useState("");
+  const [webhookTest, setWebhookTest] = useState<OrgWebhookTestResult | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -73,15 +84,21 @@ export function useOrgs(apiClient: ApiClient) {
       setSelected(org);
       setCreatedKey(null);
       setTopupAmount("");
+      setWebhookSecret("");
+      setWebhookTest(null);
       setError("");
       setBusy(true);
       try {
-        const [orgKeys, report] = await Promise.all([
+        const [orgKeys, report, hook] = await Promise.all([
           apiClient.listOrgKeys(org.id),
           apiClient.orgUsage(org.id),
+          apiClient.orgWebhook(org.id),
         ]);
         setKeys(orgKeys);
         setUsage(report.end_users);
+        setWebhook(hook);
+        setWebhookUrl(hook?.callback_url ?? "");
+        setWebhookEnabled(hook?.enabled ?? true);
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : "组织详情读取失败");
       } finally {
@@ -162,6 +179,52 @@ export function useOrgs(apiClient: ApiClient) {
     [apiClient, busy, selected],
   );
 
+  const saveWebhook = useCallback(
+    async (rotateSecret: boolean) => {
+      if (!selected || busy || !webhookUrl.trim()) return;
+      setBusy(true);
+      setError("");
+      setSuccess("");
+      setWebhookTest(null);
+      try {
+        const saved = await apiClient.saveOrgWebhook(selected.id, {
+          callback_url: webhookUrl.trim(),
+          enabled: webhookEnabled,
+          rotate_secret: rotateSecret,
+        });
+        setWebhook({
+          org_id: saved.org_id,
+          callback_url: saved.callback_url,
+          enabled: saved.enabled,
+          secret_configured: saved.secret_configured,
+        });
+        setWebhookUrl(saved.callback_url);
+        // Plaintext comes back only on create/rotate; keep any earlier one shown.
+        if (saved.secret) setWebhookSecret(saved.secret);
+        setSuccess(rotateSecret ? "回调已保存，密钥已轮换" : "回调配置已保存");
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "回调保存失败");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [apiClient, busy, selected, webhookEnabled, webhookUrl],
+  );
+
+  const testWebhook = useCallback(async () => {
+    if (!selected || busy) return;
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      setWebhookTest(await apiClient.testOrgWebhook(selected.id));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "回调测试失败");
+    } finally {
+      setBusy(false);
+    }
+  }, [apiClient, busy, selected]);
+
   return {
     orgs,
     busy,
@@ -177,11 +240,20 @@ export function useOrgs(apiClient: ApiClient) {
     keys,
     createdKey,
     usage,
+    webhook,
+    webhookUrl,
+    setWebhookUrl,
+    webhookEnabled,
+    setWebhookEnabled,
+    webhookSecret,
+    webhookTest,
     load,
     createOrg,
     openOrg,
     topup,
     createKey,
     revokeKey,
+    saveWebhook,
+    testWebhook,
   };
 }

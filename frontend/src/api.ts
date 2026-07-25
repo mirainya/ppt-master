@@ -6,6 +6,7 @@ import type {
   Confirmation,
   CreatedApiKey,
   CreatedOrgApiKey,
+  CreatedOrgWebhook,
   ImageCapabilitiesResponse,
   Job,
   JobEvent,
@@ -13,6 +14,8 @@ import type {
   Organization,
   OrgApiKey,
   OrgUsageRow,
+  OrgWebhook,
+  OrgWebhookTestResult,
   PendingFile,
   Pricing,
   RuntimeConfig,
@@ -212,6 +215,35 @@ export class ApiClient {
     if (params.until) query.set("until", params.until);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return this.request(`/v1/admin/orgs/${orgId}/usage${suffix}`);
+  }
+
+  /** Returns null when the org has no callback configured yet (404). */
+  async orgWebhook(orgId: string): Promise<OrgWebhook | null> {
+    try {
+      return await this.request<OrgWebhook>(
+        `/v1/admin/orgs/${orgId}/webhook`,
+      );
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 404) return null;
+      throw reason;
+    }
+  }
+
+  saveOrgWebhook(
+    orgId: string,
+    body: { callback_url: string; enabled: boolean; rotate_secret: boolean },
+  ): Promise<CreatedOrgWebhook> {
+    return this.request<CreatedOrgWebhook>(
+      `/v1/admin/orgs/${orgId}/webhook`,
+      { method: "PUT", body: JSON.stringify(body) },
+    );
+  }
+
+  testOrgWebhook(orgId: string): Promise<OrgWebhookTestResult> {
+    return this.request<OrgWebhookTestResult>(
+      `/v1/admin/orgs/${orgId}/webhook/test`,
+      { method: "POST" },
+    );
   }
 
   listJobs(): Promise<Job[]> {

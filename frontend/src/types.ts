@@ -198,6 +198,24 @@ export interface OrgUsageRow {
   jobs: number;
 }
 
+export interface OrgWebhook {
+  org_id: string;
+  callback_url: string;
+  enabled: boolean;
+  secret_configured: boolean;
+}
+
+/** Write response; `secret` is plaintext only when it was just created or rotated. */
+export interface CreatedOrgWebhook extends OrgWebhook {
+  secret: string;
+}
+
+export interface OrgWebhookTestResult {
+  delivered: boolean;
+  response_status: number | null;
+  error: string | null;
+}
+
 export type AppTheme = "mint" | "sakura" | "sky" | "dark";
 
 export interface ThemeOption {
