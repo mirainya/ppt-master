@@ -20,6 +20,7 @@ from service.repository import JobRepository
 from service.runtime_config import RuntimeConfigRepository
 from service.schemas import JobStatus, TERMINAL_STATUSES
 from service.storage import JobStorage, RevisionScope
+from service.webhooks import WebhookRepository, deliver_sync, next_backoff_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -637,6 +638,13 @@ async def _maintain_worker_presence(
 
 
 _CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+_WEBHOOK_SWEEP_SECONDS = 5
+# Claiming pushes next_attempt_at this far out, so a worker that dies mid-send
+# lets the row come due again instead of stranding it.
+_WEBHOOK_LEASE_SECONDS = 60
+# Re-warn at this interval while delivery is disabled, so a stuck worker keeps
+# announcing itself instead of hiding behind one startup log line.
+_WEBHOOK_WARN_INTERVAL_SECONDS = 300
 
 
 async def _maintain_file_retention(
@@ -666,6 +674,94 @@ async def _maintain_file_retention(
             continue
 
 
+async def _push_delivery(
+    webhooks: WebhookRepository,
+    delivery: dict,
+    settings: Settings,
+) -> None:
+    """Send one queued usage callback and record how it went."""
+    delivery_id = delivery["id"]
+    config = await webhooks.get(delivery["org_id"])
+    if config is None or not config.enabled:
+        # Turned off after the event was queued; drop it rather than retry forever.
+        await webhooks.mark_dead(
+            delivery_id, response_status=None, error="callback is no longer configured"
+        )
+        return
+    outcome = await asyncio.to_thread(
+        deliver_sync,
+        callback_url=config.callback_url,
+        secret=config.secret,
+        event_id=delivery_id,
+        payload=delivery["payload"],
+        timeout_seconds=float(settings.webhook_timeout_seconds),
+    )
+    if outcome.delivered:
+        await webhooks.mark_delivered(delivery_id, outcome.status or 0)
+        return
+    attempts = delivery["attempts"]
+    exhausted = attempts >= settings.webhook_max_attempts
+    if not outcome.retryable or exhausted:
+        await webhooks.mark_dead(
+            delivery_id, response_status=outcome.status, error=outcome.error
+        )
+        logger.warning(
+            "Gave up usage webhook %s after %s attempt(s): %s",
+            delivery_id,
+            attempts,
+            outcome.error,
+        )
+        return
+    await webhooks.reschedule(
+        delivery_id,
+        delay_seconds=next_backoff_seconds(attempts),
+        response_status=outcome.status,
+        error=outcome.error,
+    )
+
+
+async def _maintain_webhook_delivery(
+    webhooks: WebhookRepository,
+    settings: Settings,
+    stop: asyncio.Event,
+) -> None:
+    """Push queued usage callbacks to organization endpoints with backoff.
+
+    Never exits on a missing signing key: the key is re-checked every tick so a
+    worker that booted before its environment was ready recovers on its own, and
+    an operator sees a repeating warning with the backlog size instead of one log
+    line that scrolls away while events pile up unsent.
+    """
+    warned_at = 0.0
+    loop = asyncio.get_running_loop()
+    while not stop.is_set():
+        try:
+            if not webhooks.is_configured:
+                now = loop.time()
+                if now - warned_at >= _WEBHOOK_WARN_INTERVAL_SECONDS:
+                    warned_at = now
+                    logger.warning(
+                        "Usage webhooks are disabled without PPT_RUNTIME_CONFIG_KEY; "
+                        "%s event(s) waiting",
+                        await webhooks.count_pending(),
+                    )
+            else:
+                deliveries = await webhooks.claim_due(
+                    settings.webhook_batch_size,
+                    _WEBHOOK_LEASE_SECONDS,
+                )
+                for delivery in deliveries:
+                    if stop.is_set():
+                        break
+                    await _push_delivery(webhooks, delivery, settings)
+        except Exception:
+            logger.exception("Usage webhook sweep failed")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=_WEBHOOK_SWEEP_SECONDS)
+        except TimeoutError:
+            continue
+
+
 async def run_worker() -> None:
     """Consume Redis jobs until the process is stopped."""
     settings = Settings.from_env()
@@ -689,6 +785,11 @@ async def run_worker() -> None:
     stop_retention = asyncio.Event()
     retention_task = asyncio.create_task(
         _maintain_file_retention(repository, storage, settings, stop_retention)
+    )
+    webhooks = WebhookRepository(database, settings)
+    stop_webhooks = asyncio.Event()
+    webhook_task = asyncio.create_task(
+        _maintain_webhook_delivery(webhooks, settings, stop_webhooks)
     )
 
     try:
@@ -784,6 +885,8 @@ async def run_worker() -> None:
         await presence_task
         stop_retention.set()
         await retention_task
+        stop_webhooks.set()
+        await webhook_task
         await queue.forget_worker(worker_id)
         await runner.close()
         await queue.close()

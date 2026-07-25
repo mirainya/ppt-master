@@ -305,3 +305,51 @@ class RuntimeConfigUpdate(BaseModel):
     image_model: str = Field(default="", max_length=200)
     image_size: str = Field(default="2048x1536", max_length=32)
     image_concurrency: int | None = Field(default=None, ge=1, le=20)
+
+
+class OrgWebhookRead(BaseModel):
+    """An organization's usage callback configuration without the signing secret."""
+
+    org_id: UUID
+    callback_url: str
+    enabled: bool
+    secret_configured: bool
+
+
+class OrgWebhookUpdate(BaseModel):
+    """Administrator request setting an organization's usage callback endpoint."""
+
+    callback_url: str = Field(default="", max_length=2048)
+    enabled: bool = True
+    rotate_secret: bool = False
+
+
+class OrgWebhookCreated(OrgWebhookRead):
+    """Configuration response carrying the one-time plaintext signing secret."""
+
+    secret: str
+
+
+class OrgWebhookDeliveryRead(BaseModel):
+    """One queued or completed usage callback, for troubleshooting."""
+
+    id: UUID
+    job_id: UUID
+    event_type: str
+    event_key: str
+    payload: dict[str, Any]
+    attempts: int
+    next_attempt_at: datetime
+    delivered_at: datetime | None
+    dead_at: datetime | None
+    response_status: int | None
+    last_error: str | None
+    created_at: datetime
+
+
+class OrgWebhookTestResult(BaseModel):
+    """Outcome of a synchronous administrator-triggered test callback."""
+
+    delivered: bool
+    response_status: int | None = None
+    error: str | None = None

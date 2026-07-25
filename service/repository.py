@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -9,8 +10,12 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from service.database import Database
-from service.schemas import JobRoute, JobStatus
+from service.schemas import TERMINAL_STATUSES, JobRoute, JobStatus
 from service.storage import StoredFile
+from service.webhooks import build_final_payload, build_turn_payload
+
+
+logger = logging.getLogger(__name__)
 
 
 class OrganizationUnavailableError(RuntimeError):
@@ -316,13 +321,78 @@ class JobRepository:
                     job_id,
                     balance_after,
                 )
+                if await self._webhook_target(connection, org_id):
+                    await self._enqueue_turn_webhook(connection, record, job_id, org_id)
                 result = dict(record)
                 result["actual_cost"] = round(actual_cost, 4)
                 return result
 
+    async def _enqueue_turn_webhook(
+        self,
+        connection: asyncpg.Connection,
+        record: asyncpg.Record,
+        job_id: UUID,
+        org_id: UUID,
+    ) -> None:
+        """Snapshot this turn's usage into a queued callback event.
+
+        Runs on the billing connection so the cumulative total already includes
+        the row inserted above, which a separate connection could not yet see.
+        """
+        totals = await self._job_usage_totals(connection, job_id)
+        job = await connection.fetchrow(
+            "SELECT status, owner_id FROM jobs WHERE id = $1",
+            job_id,
+        )
+        end_user_id = await connection.fetchval(
+            "SELECT external_id FROM users WHERE id = $1",
+            record["end_user_id"],
+        )
+        event_id = uuid4()
+        payload = build_turn_payload(
+            event_id=event_id,
+            org_id=org_id,
+            job_id=job_id,
+            end_user_id=end_user_id,
+            job_status=job["status"] if job else "",
+            turn_id=record["turn_id"],
+            turn_index=totals["turns"],
+            occurred_at=record["created_at"],
+            delta={
+                "input_tokens": record["input_tokens"],
+                "output_tokens": record["output_tokens"],
+                "images": record["images"],
+                "pages": record["pages"],
+                "credits": record["charged_credits"],
+            },
+            job_total=totals,
+        )
+        await self._enqueue_webhook(
+            connection,
+            org_id=org_id,
+            job_id=job_id,
+            event_type="usage.turn",
+            event_key=record["turn_id"],
+            payload=payload,
+        )
+
     async def get_job_usage(self, job_id: UUID) -> dict[str, Any]:
         """Aggregate one job's metered usage and the credits we charged for it."""
-        usage = await self.database.require_pool().fetchrow(
+        async with self.database.require_pool().acquire() as connection:
+            return await self._job_usage_totals(connection, job_id)
+
+    @staticmethod
+    async def _job_usage_totals(
+        connection: asyncpg.Connection,
+        job_id: UUID,
+    ) -> dict[str, Any]:
+        """Sum a job's usage on a caller-supplied connection.
+
+        Takes the connection so the webhook enqueue inside record_turn_usage can
+        read the turn it just inserted, which a separate connection could not see
+        before that transaction commits.
+        """
+        usage = await connection.fetchrow(
             """
             SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -423,7 +493,47 @@ class JobRepository:
                         message,
                         {"progress": progress, "error": error},
                     )
+                    if status in TERMINAL_STATUSES and await self._webhook_target(
+                        connection, record["org_id"]
+                    ):
+                        await self._enqueue_final_webhook(connection, record)
         return dict(record) if record else None
+
+    async def _enqueue_final_webhook(
+        self,
+        connection: asyncpg.Connection,
+        job: asyncpg.Record,
+    ) -> None:
+        """Queue the terminal usage event for a job that just reached a final state.
+
+        Keyed on billed_turns so a job resumed after a terminal state (the resume
+        endpoint accepts succeeded/failed) emits a fresh event for its new total
+        instead of being swallowed by the idempotency key.
+        """
+        job_id = job["id"]
+        totals = await self._job_usage_totals(connection, job_id)
+        end_user_id = await connection.fetchval(
+            "SELECT external_id FROM users WHERE id = $1",
+            job["owner_id"],
+        )
+        event_id = uuid4()
+        payload = build_final_payload(
+            event_id=event_id,
+            org_id=job["org_id"],
+            job_id=job_id,
+            end_user_id=end_user_id,
+            job_status=job["status"],
+            occurred_at=job["updated_at"],
+            job_total=totals,
+        )
+        await self._enqueue_webhook(
+            connection,
+            org_id=job["org_id"],
+            job_id=job_id,
+            event_type="usage.final",
+            event_key=str(job["billed_turns"]),
+            payload=payload,
+        )
 
     async def list_events(
         self, job_id: UUID, after_id: int = 0
@@ -701,6 +811,56 @@ class JobRepository:
             role,
             content,
         )
+
+    @staticmethod
+    async def _webhook_target(
+        connection: asyncpg.Connection,
+        org_id: UUID | None,
+    ) -> bool:
+        """Whether this organization currently wants usage callbacks."""
+        if org_id is None:
+            return False
+        return bool(
+            await connection.fetchval(
+                "SELECT enabled FROM org_webhooks WHERE org_id = $1",
+                org_id,
+            )
+        )
+
+    @staticmethod
+    async def _enqueue_webhook(
+        connection: asyncpg.Connection,
+        *,
+        org_id: UUID,
+        job_id: UUID,
+        event_type: str,
+        event_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Queue one usage callback inside the caller's transaction.
+
+        Rides along with the billing or status write so a delivered charge always
+        has a queued event, but sits in its own savepoint: a problem with the
+        callback table must never roll back the charge or the status it rode with.
+        """
+        try:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO webhook_deliveries
+                        (id, org_id, job_id, event_type, event_key, payload)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (job_id, event_type, event_key) DO NOTHING
+                    """,
+                    uuid4(),
+                    org_id,
+                    job_id,
+                    event_type,
+                    event_key,
+                    payload,
+                )
+        except Exception:
+            logger.exception("Could not queue %s webhook for %s", event_type, job_id)
 
     @staticmethod
     async def _add_event(

@@ -87,6 +87,9 @@ class Settings:
     image_model: str
     image_size: str
     image_concurrency: int | None
+    webhook_timeout_seconds: int
+    webhook_max_attempts: int
+    webhook_batch_size: int
     repo_root: Path
 
     @classmethod
@@ -122,6 +125,9 @@ class Settings:
             image_model=os.environ.get("PPT_IMAGE_MODEL", "").strip(),
             image_size=os.environ.get("PPT_IMAGE_SIZE", "2048x1536").strip(),
             image_concurrency=_optional_positive_int("PPT_IMAGE_CONCURRENCY"),
+            webhook_timeout_seconds=_positive_int("PPT_WEBHOOK_TIMEOUT_SECONDS", 10),
+            webhook_max_attempts=_positive_int("PPT_WEBHOOK_MAX_ATTEMPTS", 8),
+            webhook_batch_size=_positive_int("PPT_WEBHOOK_BATCH_SIZE", 20),
             repo_root=repo_root,
         )
 

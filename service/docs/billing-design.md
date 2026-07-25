@@ -289,9 +289,34 @@ CREATE TABLE billing_config (
 - **调优 `hold_amount`**：观察 `usage_records` 单轮实际成本分布，取 P95 左右，平衡"占用余额"与"欠费敞口"。
 - **后续增强**：按企业单独定价（per-org override）时，加一张 `org_billing_config` 覆盖全局默认。
 
-## 9. 后续增强（真待定）
+## 9. 用量回调（已实现）
 
-- **Webhook 推送**：第 2 层 Pull 之后的增强，任务完成回调企业 `callback_url`（含重试 + 签名）。
+第 2 层 Pull 之外的 Push 通道。接入说明见 [`enterprise-integration.md`](./enterprise-integration.md) 第 6 节，此处只记实现口径。
+
+**为什么需要**：企业员工经 SSO 票据进工作台后，建任务是浏览器直连服务端，不过企业网关，
+所以企业无法做额度准入。回调把实时用量交给企业，由企业自行累计并在超限时调 cancel。
+
+**入队与计费同事务**：`usage.turn` 在 `record_turn_usage` 的事务内入队，`usage.final` 在
+`set_status` 的事务内入队（终态写入全部经过它，无旁路）。这样「计费成功即事件已入队」由数据库
+保证，不需要补偿逻辑；崩溃重放时计费幂等返回 `None`，事件也不会重复。
+
+**savepoint 隔离**：入队语句包在嵌套事务（savepoint）里并吞掉异常。因为计费事务同时在改
+`organizations.credit_balance`，若回调表的问题能回滚整个事务，就会连带「这一轮不计费 + 任务被判失败」。
+回调可丢，计费不可丢，优先级由此体现。
+
+**幂等键 `(job_id, event_type, event_key)`**：turn 事件的 `event_key` 是 `usage_records.turn_id`；
+final 事件是 `jobs.billed_turns` —— 终态任务可被 resume 续做后再次终态，用固定键会静默吞掉
+第二条 final，企业将永远看不到续做后的真实总量。
+
+**投递**：worker 第三个后台循环，`FOR UPDATE SKIP LOCKED` 领取并在同语句把 `next_attempt_at`
+推后 60 秒。没有 `sending` 中间态：worker 崩在发送途中，该行到期后自然重发。因此语义是
+至少一次，企业按 `X-PPTM-Event-Id` 去重。
+
+**SSRF**：回调地址由管理员代配（不开放企业自助），发送前每次重新解析并拒绝非公网地址，
+连接钉在已校验 IP 上防 DNS rebinding，证书校验仍针对域名。不提供放行内网的开关。
+
+## 10. 后续增强（真待定）
+
 - **OAuth2 客户端凭证**：组织 API Key 之后的高级凭证选项（短期令牌 + 轮换）。
 - **文件物理隔离**：合规敏感客户如需按 org 分目录存储，另行设计。
 - **SAML 2.0**：若出现要求员工登录（场景 A）的大客户再评估。

@@ -165,12 +165,124 @@ curl 'https://<host>/v1/orgs/usage?end_user_id=cust-42&since=2026-07-01T00:00:00
 调用该接口时会被强制限定为**调用者自己**的终端用户；显式传入他人的 `end_user_id` 返回 `403`。
 出账请始终在第三方后端用组织 Key 调用。
 
-## 6. 数据隔离说明
+## 6. 用量回调（Webhook）
+
+上一节的接口是 Pull，最快也只能轮询。若需要实时管住企业内部某个终端用户的消耗，用回调：
+服务方在**每轮结算后立刻**把用量推给企业接口，企业自行累计，超限时调 cancel 停任务。
+
+### 开通
+
+回调地址与签名密钥由**服务方管理员**代配（不开放企业自助，回调地址是服务端的出站目标）：
+
+```bash
+curl -X PUT https://<host>/v1/admin/orgs/<org_id>/webhook \
+  -H 'Content-Type: application/json' -b admin_session \
+  -d '{"callback_url":"https://acme.example.com/pptm/usage","enabled":true}'
+# → 返回配置，并在首次创建或 rotate_secret=true 时带一次性明文 secret
+
+# 录入后立刻验证连通性（该测试事件不进投递记录）
+curl -X POST https://<host>/v1/admin/orgs/<org_id>/webhook/test -b admin_session
+```
+
+回调地址必须是**公网 HTTPS**。服务端在每次发送前重新解析域名，拒绝环回、私有、链路本地
+（含 `169.254.169.254`）等地址，并把连接钉在已校验的 IP 上，因此内网地址一律发不出去。
+重定向不跟随，3xx 视为失败。
+
+企业侧可只读自查（组织 API Key，工作台 Session 无权访问）：
+
+```bash
+curl https://<host>/v1/orgs/webhook -H 'Authorization: Bearer pptm_org_xxxxx'
+curl 'https://<host>/v1/orgs/webhook/deliveries?limit=20' \
+  -H 'Authorization: Bearer pptm_org_xxxxx'
+```
+
+### 事件
+
+| 事件 | 何时发出 | `delta` | `usage_status` |
+|---|---|---|---|
+| `usage.turn` | 每轮 agent turn 计费落库后 | 本轮增量 | `partial` |
+| `usage.final` | 任务进入 succeeded/failed/cancelled | `null` | `final` |
+
+```json
+{
+  "event_id": "9f1c0f2e-4b7a-4c31-9d55-2a7e6b0c1f88",
+  "event_type": "usage.turn",
+  "occurred_at": "2026-07-25T09:12:03.114203Z",
+  "org_id": "3a8f...",
+  "end_user_id": "cust-42",
+  "job_id": "7c21...",
+  "job_status": "executing",
+  "usage_status": "partial",
+  "turn": {"index": 3, "turn_id": "01JZQ8..."},
+  "delta": {
+    "input_tokens": 4200, "output_tokens": 1100, "images": 2, "pages": 3,
+    "our_charge": {"credits": 0.1084}
+  },
+  "job_total": {
+    "input_tokens": 12000, "output_tokens": 3400, "images": 5, "pages": 9,
+    "turns": 3, "our_charge": {"credits": 0.2736}
+  }
+}
+```
+
+`delta.*` 与 `job_total.*` 的字段名与 `GET /v1/jobs/{id}/usage` 完全一致，§5 的累计口径表
+（尤其 `pages` 是最高水位）直接适用。**`job_total` 是权威值，不要靠累加 `delta` 求总量** ——
+投递是至少一次且不保证顺序。`usage.final` 的 `delta` 是 `null` 而非全零：终态事件是完成标记，
+不是一轮零消耗。
+
+任务终态后若被 resume 续做，再次终态会发出**新的** `usage.final`（幂等键含已计费轮数），
+`job_total` 是续做后的新总量。
+
+### 验签
+
+请求头：
+
+| Header | 说明 |
+|---|---|
+| `X-PPTM-Event-Id` | 事件 id，跨重试不变 —— **用它做幂等去重** |
+| `X-PPTM-Timestamp` | Unix 秒，每次尝试都变 |
+| `X-PPTM-Signature` | `sha256=<hex>` |
+
+签名是 `HMAC-SHA256(secret, f"{timestamp}." + body)`。务必对**收到的原始 body 字节**验签，
+不要反序列化再重新序列化：
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, timestamp: str, signature: str, body: bytes) -> bool:
+    if abs(time.time() - int(timestamp)) > 300:   # 防重放
+        return False
+    expected = hmac.new(
+        secret.encode(), f"{timestamp}.".encode() + body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(f"sha256={expected}", signature)
+```
+
+### 重试与死信
+
+返回 2xx 视为成功。5xx、429、408、网络错误按 `10s → 30s → 2m → 10m → 1h → 6h`（其后维持 6h）
+退避，共 8 次；其余 4xx 与回调地址校验失败**立即死信**不再重试。死信保留在投递记录里，
+`dead_at` 有值、`last_error` 记明原因。
+
+### 超限闭环
+
+```bash
+# 累计超限时用组织 Key 停掉该任务
+curl -X POST https://<host>/v1/jobs/<job_id>/cancel \
+  -H 'Authorization: Bearer pptm_org_xxxxx' -H 'X-End-User-Id: cust-42'
+```
+
+**坑**：`end_user_id` 为 `__service__` 时（企业建任务未带 `X-End-User-Id`）**不要**回传该值，
+它是保留字会返回 `400`；此时省略该头即命中默认服务账号。
+
+注意 cancel 只停当前任务，该终端用户仍可再建新任务（工作台 Session 有效期内）。
+
+## 7. 数据隔离说明
 
 - 逻辑隔离：企业之间、企业内终端用户之间的任务与产物互相不可见（基于所有者鉴权）。
 - 物理存储未按组织分目录（同一运行目录混放），仅靠接口鉴权隔离。对物理隔离有合规要求的场景需另行约定。
 
-## 7. Python 示例
+## 8. Python 示例
 
 ```python
 import httpx

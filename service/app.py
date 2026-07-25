@@ -77,6 +77,11 @@ from service.schemas import (
     OrgKeyCreate,
     OrgTicketConsume,
     OrgTicketCreated,
+    OrgWebhookCreated,
+    OrgWebhookDeliveryRead,
+    OrgWebhookRead,
+    OrgWebhookTestResult,
+    OrgWebhookUpdate,
     PricingUpdate,
     RuntimeConfigRead,
     RuntimeConfigUpdate,
@@ -85,6 +90,11 @@ from service.schemas import (
 )
 from service.storage import JobStorage
 from service.runtime_config import RuntimeConfig, RuntimeConfigRepository
+from service.webhooks import (
+    WebhookAddressError,
+    WebhookRepository,
+    deliver_sync,
+)
 
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -108,6 +118,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.repository = JobRepository(database)
     app.state.billing_repository = BillingRepository(database)
     app.state.runtime_config_repository = RuntimeConfigRepository(database, settings)
+    app.state.webhook_repository = WebhookRepository(database, settings)
     app.state.ticket_store = ticket_store
     app.state.queue = queue
     app.state.storage = storage
@@ -202,6 +213,28 @@ async def require_org_api_user(
     return await repository.provision_end_user(org_id, _resolve_end_user_id(request))
 
 
+async def require_org_key(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> UUID:
+    """Authenticate an organization API key alone, without provisioning a user.
+
+    Returns the org id rather than an AuthenticatedUser on purpose: org-scoped
+    reads have no end-user identity to accidentally filter by, and skipping
+    provision_end_user keeps a config read from creating a users row. Excluding
+    session cookies also stops an SSO end-user from reading org-level settings.
+    """
+    if credentials is None or not is_org_api_key(credentials.credentials):
+        raise _authentication_error()
+    repository: AuthRepository = request.app.state.auth_repository
+    org_id = await repository.authenticate_org_api_key(
+        hash_token(credentials.credentials)
+    )
+    if org_id is None:
+        raise _authentication_error()
+    return org_id
+
+
 async def require_browser_user(request: Request) -> AuthenticatedUser:
     session_token = request.cookies.get(SESSION_COOKIE, "")
     if not session_token:
@@ -232,6 +265,7 @@ async def require_admin_user(request: Request) -> AuthenticatedUser:
 
 CurrentUser = Annotated[AuthenticatedUser, Depends(require_user)]
 OrgApiUser = Annotated[AuthenticatedUser, Depends(require_org_api_user)]
+OrgKeyOnly = Annotated[UUID, Depends(require_org_key)]
 BrowserUser = Annotated[AuthenticatedUser, Depends(require_browser_user)]
 PersonalBrowserUser = Annotated[
     AuthenticatedUser, Depends(require_personal_browser_user)
@@ -1085,6 +1119,35 @@ async def org_usage(
     return {"org_id": user.org_id, "end_users": rows}
 
 
+def _org_webhook_read(config) -> dict:
+    """Shape a callback config for the wire, never exposing the signing secret."""
+    return {
+        "org_id": config.org_id,
+        "callback_url": config.callback_url,
+        "enabled": config.enabled,
+        "secret_configured": bool(config.secret),
+    }
+
+
+@app.get("/v1/orgs/webhook", response_model=OrgWebhookRead)
+async def org_webhook(request: Request, org_id: OrgKeyOnly) -> dict:
+    """Read this organization's usage callback configuration."""
+    config = await request.app.state.webhook_repository.get(org_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="webhook is not configured")
+    return _org_webhook_read(config)
+
+
+@app.get("/v1/orgs/webhook/deliveries", response_model=list[OrgWebhookDeliveryRead])
+async def org_webhook_deliveries(
+    request: Request,
+    org_id: OrgKeyOnly,
+    limit: int = 20,
+) -> list[dict]:
+    """List this organization's recent usage callback attempts."""
+    return await request.app.state.webhook_repository.list_deliveries(org_id, limit)
+
+
 @app.get("/v1/admin/jobs", response_model=list[AdminJobRead])
 async def admin_list_jobs(
     request: Request,
@@ -1330,6 +1393,76 @@ async def admin_org_usage(
         org_id, external_id=end_user_id, since=since, until=until
     )
     return {"org_id": org_id, "end_users": rows}
+
+
+@app.get("/v1/admin/orgs/{org_id}/webhook", response_model=OrgWebhookRead)
+async def admin_get_org_webhook(
+    request: Request, org_id: UUID, admin: AdminUser
+) -> dict:
+    """Read one organization's usage callback configuration."""
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    config = await request.app.state.webhook_repository.get(org_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="webhook is not configured")
+    return _org_webhook_read(config)
+
+
+@app.put("/v1/admin/orgs/{org_id}/webhook", response_model=OrgWebhookCreated)
+async def admin_update_org_webhook(
+    request: Request,
+    org_id: UUID,
+    submission: OrgWebhookUpdate,
+    admin: AdminUser,
+) -> dict:
+    """Set one organization's usage callback endpoint.
+
+    The signing secret is server-generated and returned in plaintext only on the
+    call that creates or rotates it.
+    """
+    if await request.app.state.auth_repository.get_organization(org_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    try:
+        config, new_secret = await request.app.state.webhook_repository.upsert(
+            org_id,
+            callback_url=submission.callback_url,
+            enabled=submission.enabled,
+            rotate_secret=submission.rotate_secret,
+        )
+    except WebhookAddressError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {**_org_webhook_read(config), "secret": new_secret or ""}
+
+
+@app.post(
+    "/v1/admin/orgs/{org_id}/webhook/test", response_model=OrgWebhookTestResult
+)
+async def admin_test_org_webhook(
+    request: Request, org_id: UUID, admin: AdminUser
+) -> dict:
+    """Send one throwaway event so a new endpoint can be verified immediately.
+
+    Not recorded in webhook_deliveries: test traffic must not pollute the outbox
+    an enterprise reconciles against.
+    """
+    config = await request.app.state.webhook_repository.get(org_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail="webhook is not configured")
+    outcome = await asyncio.to_thread(
+        deliver_sync,
+        callback_url=config.callback_url,
+        secret=config.secret,
+        event_id=uuid4(),
+        payload={"event_type": "webhook.test", "org_id": str(org_id)},
+        timeout_seconds=float(request.app.state.settings.webhook_timeout_seconds),
+    )
+    return {
+        "delivered": outcome.delivered,
+        "response_status": outcome.status,
+        "error": outcome.error or None,
+    }
 
 
 @app.get("/v1/admin/billing-config")
